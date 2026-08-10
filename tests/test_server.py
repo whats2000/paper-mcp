@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+from paper_mcp.config import settings
+from paper_mcp.server import build_mcp_server, create_app, transport_security
+
+EXPECTED_TOOLS = {"search_arxiv", "search_papers", "find_related", "resolve_paper"}
+
+
+@pytest.fixture
+def _allow_testserver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TestClient sends `Host: testserver`, which DNS-rebinding protection
+    rejects by default — exactly as it would reject an unlisted public
+    hostname. Allowlist it the same way an operator allowlists their domain.
+    """
+    monkeypatch.setenv("PAPER_MCP_ALLOWED_HOSTS", "testserver")
+
+
+def test_health_reports_ok_and_version(_allow_testserver: None) -> None:
+    with TestClient(create_app()) as client:
+        resp = client.get("/health")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["version"] == "0.1.0"
+
+
+async def test_all_four_discovery_tools_are_registered() -> None:
+    server = build_mcp_server()
+
+    names = {tool.name for tool in await server.list_tools()}
+
+    assert names >= EXPECTED_TOOLS
+
+
+async def test_every_tool_declares_its_scope_in_its_description() -> None:
+    # SRS NFR-05: a caller must be able to see what a tool reaches.
+    server = build_mcp_server()
+
+    for tool in await server.list_tools():
+        assert tool.description, f"{tool.name} has no description"
+        assert "scope" in tool.description.lower(), (
+            f"{tool.name} does not declare its network scope"
+        )
+
+
+async def test_tool_input_schemas_are_generated_from_the_signatures() -> None:
+    server = build_mcp_server()
+    by_name = {tool.name: tool for tool in await server.list_tools()}
+
+    search = by_name["search_arxiv"].input_schema
+    assert "query" in search["properties"]
+    assert search["required"] == ["query"]  # max_results has a default
+
+    related = by_name["find_related"].input_schema
+    # `mode` is a Literal, so the schema must constrain it to the three valid
+    # values rather than accepting any string.
+    assert related["properties"]["mode"]["enum"] == ["cites", "cited_by", "similar"]
+
+
+def test_unlisted_host_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DNS-rebinding protection is on by default; `testserver` is not allowed.
+    monkeypatch.setenv("PAPER_MCP_ALLOWED_HOSTS", "paper-mcp.example.org")
+
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/mcp",
+            headers={"Accept": "application/json, text/event-stream"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        )
+
+    assert resp.status_code == 421
+
+
+def test_wildcard_disables_rebinding_protection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PAPER_MCP_ALLOWED_HOSTS", "*")
+
+    assert transport_security(settings()).enable_dns_rebinding_protection is False
+
+
+def test_mcp_endpoint_answers_at_slash_mcp_without_redirecting(
+    _allow_testserver: None,
+) -> None:
+    # The URL an operator pastes into a connector is `https://host/mcp`. If
+    # that 307s to `/mcp/`, a client that does not follow redirects sees a
+    # broken server. Assert the direct hit, with redirects disabled so a
+    # regression cannot hide behind the test client following them.
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/mcp",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 200, f"expected a direct 200, got {resp.status_code}"
+
+
+def test_mcp_endpoint_is_mounted_and_answers_tools_list(_allow_testserver: None) -> None:
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/mcp",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        )
+
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()["result"]["tools"]}
+    assert names >= EXPECTED_TOOLS
