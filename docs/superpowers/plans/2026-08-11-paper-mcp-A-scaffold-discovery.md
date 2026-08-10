@@ -1433,7 +1433,23 @@ git commit -m "feat(tools): add discovery tool layer with Unpaywall-backed resol
   - `def create_app() -> FastAPI`
   - `def main() -> None` (the `paper-mcp` console script)
 
-Mount pattern note: Starlette does **not** propagate a mounted sub-app's lifespan to the parent. FastMCP's streamable-HTTP transport needs its session manager started, so the parent lifespan must enter it explicitly — otherwise the first `POST /mcp` raises `RuntimeError: Task group is not initialized`. This is a lesson carried over from PaperHub's `mcp/mounting.py`.
+> **⚠ As-built correction — the code in this task was drafted against `mcp` 1.x.** The installed library is **`mcp` 2.0**, whose API differs. Read `src/paper_mcp/server.py` as the source of truth; the differences are:
+>
+> | 1.x (drafted below) | 2.0 (as built) |
+> | --- | --- |
+> | `from mcp.server.fastmcp import FastMCP` | `from mcp.server.mcpserver import MCPServer` |
+> | `FastMCP(name, streamable_http_path="/")` | `MCPServer(name=..., version=...)` |
+> | `server.settings.json_response = True` | kwargs on `streamable_http_app(...)` |
+> | `Tool.inputSchema` | `Tool.input_schema` |
+> | `session_manager` available immediately | raises unless `streamable_http_app()` was called first |
+>
+> `list_tools()` is **async** in both.
+
+Mount pattern note: Starlette does **not** propagate a mounted sub-app's lifespan to the parent. The streamable-HTTP transport needs its session manager started, so the parent lifespan must enter it explicitly — otherwise the first `POST /mcp` raises `RuntimeError: Task group is not initialized`. This is a lesson carried over from PaperHub's `mcp/mounting.py`.
+
+**Trailing-slash trap (found in the live run, not by the tests).** Building the sub-app with `streamable_http_path="/"` and mounting it at `"/mcp"` makes Starlette strip the prefix, so the sub-app matches `""` against its `"/"` route and `POST /mcp` answers **307 → `/mcp/`**. `TestClient` follows redirects by default, so the suite passed while a connector configured with `https://host/mcp` would have received a redirect instead of a response. Build the sub-app with `streamable_http_path="/mcp"` and mount it at `""`. The regression test must pass `follow_redirects=False`, or it cannot detect this at all.
+
+**Host allowlisting is not optional.** `mcp` 2.0 validates the `Host` header (DNS-rebinding protection) and returns **421 Misdirected Request** for an unlisted host. A public deployment must set `PAPER_MCP_ALLOWED_HOSTS` to its own hostname; the default covers localhost only. The bind address is `PAPER_MCP_HOST`/`PAPER_MCP_PORT` — do not hardcode it, or the service will silently collide with whatever else owns port 8000.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1638,11 +1654,14 @@ git commit -m "feat(server): mount FastMCP streamable-HTTP surface with discover
 
 ## Phase A Completion Gate
 
-- [ ] `uv run pytest -v` — all green
-- [ ] `uv run ruff check src tests` — clean
-- [ ] `uv run mypy src` — clean
-- [ ] `tools/list` over HTTP returns all four tools with scope-declaring descriptions
-- [ ] A real MCP client (Claude Desktop / `mcp` CLI) pointed at `http://localhost:8000/mcp` lists and successfully calls `search_arxiv`
+- [x] `uv run pytest -v` — **53 passed**
+- [x] `uv run ruff check src tests` — clean
+- [x] `uv run mypy src` — clean (10 source files, strict)
+- [x] `tools/list` over HTTP returns all four tools with scope-declaring descriptions — `['find_related', 'resolve_paper', 'search_arxiv', 'search_papers']`
+- [x] `POST /mcp` answers **200 directly**, no redirect
+- [x] Live `tools/call search_arxiv` against real arXiv returns normalized `PaperRef`s
+- [x] Live `tools/call resolve_paper "1706.03762"` returns exactly *Attention Is All You Need* via the exact-id path
+- [ ] A real MCP client (Claude Cowork custom connector / Claude Desktop) pointed at the deployed URL lists and calls the tools — **deferred to Phase D**, since Cowork brokers remote MCP through Anthropic's servers and therefore needs the public deployment plus auth to exist first (SRS I-8 #1)
 
 ---
 

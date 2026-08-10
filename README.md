@@ -13,13 +13,15 @@ identity degrades to a quota key.
 
 ## Status
 
-Phase A (scaffold + discovery tools) — in progress.
+**Phase A complete** — the four discovery tools are live over MCP.
 
 | Tool | Phase | Status |
 | --- | --- | --- |
-| `search_arxiv` · `search_papers` · `find_related` · `resolve_paper` | A | in progress |
+| `search_arxiv` · `search_papers` · `find_related` · `resolve_paper` | A | ✅ shipped |
 | `fetch_paper` · `get_section` · `get_job` | B | planned |
-| `compile_latex` | C | planned |
+| `compile_latex` (sandboxed) | C | planned |
+| OIDC auth + quota | D | planned |
+| Portable skills + container | E | planned |
 
 ## Development
 
@@ -28,8 +30,32 @@ uv sync
 uv run pytest
 uv run ruff check src tests
 uv run mypy src
-uv run paper-mcp          # serves on :8000, MCP at POST /mcp
+uv run paper-mcp
 ```
+
+Verify it end to end:
+
+```bash
+curl -s http://127.0.0.1:8000/health
+curl -s -X POST http://127.0.0.1:8000/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+## Configuration
+
+Environment only (twelve-factor). Nothing is read from a config file.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PAPER_MCP_HOST` / `PAPER_MCP_PORT` | `0.0.0.0` / `8000` | Bind address |
+| `PAPER_MCP_ALLOWED_HOSTS` | localhost only | **DNS-rebinding protection.** A public deployment must list its own hostname or every request gets `421`. `*` disables the check and is warned about at boot |
+| `PAPER_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | CORS origins for browser clients |
+| `PAPER_MCP_AUTH_MODE` | `open` | `open` disables authentication — development only |
+| `PAPER_MCP_UNPAYWALL_EMAIL` | unset | Contact email enabling Unpaywall open-access lookup in `resolve_paper` |
+| `PAPER_MCP_S2_API_KEY` | unset | Semantic Scholar key; raises the rate limit |
+| `PAPER_MCP_LOG_LEVEL` | `INFO` | Log level |
 
 ## Documentation
 
