@@ -47,3 +47,9 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 strict = true
 python_version = "3.12"
 files = ["src"]
+
+# `arxiv` ships no py.typed marker. Scoped to that one module so strict mode
+# still applies everywhere else; `_to_result` narrows its values explicitly.
+[[tool.mypy.overrides]]
+module = ["arxiv.*"]
+ignore_missing_imports = true
