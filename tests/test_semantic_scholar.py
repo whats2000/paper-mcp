@@ -6,10 +6,11 @@ import httpx
 import pytest
 import respx
 
-from paper_mcp.models import RateLimitedError, UpstreamError
+from paper_mcp.models import NotFoundError, RateLimitedError, UpstreamError
 from paper_mcp.pipelines import semantic_scholar as ss
 from paper_mcp.pipelines.semantic_scholar import (
     S2Hit,
+    fetch_paper_metadata,
     find_related,
     s2_to_ref,
     search_papers,
@@ -158,16 +159,57 @@ async def test_find_related_uses_the_citations_endpoint_for_cited_by() -> None:
 
 
 @respx.mock
-async def test_find_related_similar_reads_papers_directly() -> None:
-    respx.get(
-        "https://api.semanticscholar.org/graph/v1/paper/abc123/related"
+async def test_find_related_similar_uses_the_recommendations_service() -> None:
+    # `graph/v1/paper/{id}/related` does not exist — it 404s with a misleading
+    # "Paper with id <id>/related not found". Similar papers come from a
+    # separate service, under a different response key.
+    route = respx.get(
+        "https://api.semanticscholar.org/recommendations/v1/papers/forpaper/abc123"
     ).mock(
-        return_value=httpx.Response(200, json={"data": [{"paperId": "z9", "title": "Kin"}]})
+        return_value=httpx.Response(
+            200, json={"recommendedPapers": [{"paperId": "z9", "title": "Kin"}]}
+        )
     )
 
     hits = await find_related("ss:abc123", mode="similar")
 
     assert hits[0].title == "Kin"
+    # Without `from`, the service returns an empty list for most papers.
+    assert route.calls.last.request.url.params["from"] == "all-cs"
+
+
+@respx.mock
+async def test_a_404_is_not_found_not_an_upstream_fault() -> None:
+    # Semantic Scholar simply not having a paper is an ordinary answer; the
+    # caller can still fall back to a title search.
+    respx.get(
+        "https://api.semanticscholar.org/graph/v1/paper/DOI:10.1/x"
+    ).mock(return_value=httpx.Response(404, json={"error": "not found"}))
+
+    with pytest.raises(NotFoundError):
+        await fetch_paper_metadata("doi:10.1/x")
+
+
+@respx.mock
+async def test_citation_results_without_the_nested_paper_are_skipped() -> None:
+    respx.get(
+        "https://api.semanticscholar.org/graph/v1/paper/arXiv:1706.03762/citations"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"citingPaper": None},
+                    {},
+                    {"citingPaper": {"paperId": "z9", "title": "Real"}},
+                ]
+            },
+        )
+    )
+
+    hits = await find_related("arxiv:1706.03762", mode="cited_by")
+
+    assert [h.title for h in hits] == ["Real"]
 
 
 def test_s2_to_ref_prefers_arxiv_id_and_reports_open_access() -> None:

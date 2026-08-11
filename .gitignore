@@ -9,3 +9,6 @@ build/
 *.egg-info/
 .env
 artifacts/
+.coverage
+coverage.xml
+htmlcov/

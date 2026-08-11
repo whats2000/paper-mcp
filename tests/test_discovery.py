@@ -152,6 +152,63 @@ async def test_resolve_paper_consults_unpaywall_when_s2_has_no_source(
     assert ref.open_access.url == "https://repo.example/p.pdf"
 
 
+async def test_resolve_paper_falls_through_when_the_doi_is_unknown_to_s2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A DOI Semantic Scholar has never seen must not hard-fail the tool —
+    # the title search may still find the paper.
+    async def _missing(paper_id: str) -> S2Hit:
+        raise NotFoundError("no record")
+
+    monkeypatch.setattr(discovery, "fetch_paper_metadata", _missing)
+    monkeypatch.setattr(
+        discovery,
+        "search_papers",
+        _s2_search_returning(S2Hit(s2_id="found", title="Found By Title")),
+    )
+
+    ref = await discovery.tool_resolve_paper("10.1038/nature14539")
+
+    assert ref.paper_id == "ss:found"
+    assert ref.title == "Found By Title"
+
+
+async def test_resolve_paper_reports_not_found_when_doi_and_search_both_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _missing(paper_id: str) -> S2Hit:
+        raise NotFoundError("no record")
+
+    monkeypatch.setattr(discovery, "fetch_paper_metadata", _missing)
+    monkeypatch.setattr(discovery, "search_papers", _s2_search_returning())
+
+    with pytest.raises(NotFoundError):
+        await discovery.tool_resolve_paper("10.9999/does-not-exist")
+
+
+async def test_search_arxiv_does_not_block_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The arxiv library is synchronous. Called directly from an async handler
+    # it blocks the loop and serializes every concurrent request behind it,
+    # so it must be dispatched to a worker thread.
+    import threading
+
+    calling_thread: dict[str, int] = {}
+
+    def _blocking(query: str, max_results: int = 8) -> list[ArxivResult]:
+        calling_thread["id"] = threading.get_ident()
+        return []
+
+    monkeypatch.setattr(discovery, "search_arxiv", _blocking)
+
+    await discovery.tool_search_arxiv("anything")
+
+    assert calling_thread["id"] != threading.get_ident(), (
+        "arxiv client ran on the event loop thread"
+    )
+
+
 async def test_resolve_paper_explains_when_unpaywall_is_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

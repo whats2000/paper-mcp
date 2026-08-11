@@ -63,8 +63,39 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | CORS origins for browser clients |
 | `PAPER_MCP_AUTH_MODE` | `open` | `open` disables authentication — development only |
 | `PAPER_MCP_UNPAYWALL_EMAIL` | unset | Contact email enabling Unpaywall open-access lookup in `resolve_paper` |
-| `PAPER_MCP_S2_API_KEY` | unset | Semantic Scholar key; raises the rate limit |
+| `PAPER_MCP_S2_API_KEY` | unset | **Effectively required in production** — see below |
 | `PAPER_MCP_LOG_LEVEL` | `INFO` | Log level |
+
+### Semantic Scholar needs an API key
+
+Measured on-device against the live API: the keyless tier throttles the
+**search** endpoint so hard it is unusable. A single `search_papers` call
+still returned HTTP 429 after **237 seconds** of paced retries, and a title
+lookup after **873 seconds**. Single-paper lookups (`/paper/{id}` by arXiv id,
+DOI, or S2 id) and the citation-graph endpoints answered fine throughout.
+
+So without `PAPER_MCP_S2_API_KEY`:
+
+| Works | Unreliable |
+| --- | --- |
+| `search_arxiv` (different upstream) | `search_papers` |
+| `resolve_paper` by arXiv id / DOI / `ss:` id | `resolve_paper` by free-text title |
+| `find_related` (all three modes) | |
+
+Callers get a typed `rate_limited` error carrying `retry_after`, never a hang
+or a silently empty result — but the capability is degraded. Get a key at
+<https://www.semanticscholar.org/product/api>.
+
+### On-device acceptance check
+
+```bash
+uv run python scripts/on_device_check.py
+```
+
+Boots the service through its real entry point and drives it with a real MCP
+client over the wire, covering every tool and every externally-dependent
+branch. Exits non-zero on failure; a throttled upstream is reported `skip`,
+never `pass`. Set `PAPER_MCP_S2_API_KEY` for a run with no skips.
 
 ## Documentation
 

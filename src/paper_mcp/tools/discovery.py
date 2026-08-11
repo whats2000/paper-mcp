@@ -6,6 +6,7 @@ capped at 50 per call.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 from paper_mcp.config import settings
@@ -30,7 +31,12 @@ def _unpaywall_email() -> str | None:
 
 async def tool_search_arxiv(query: str, max_results: int = 8) -> list[PaperRef]:
     """Relevance search over arXiv. Metadata only; nothing is downloaded."""
-    return [arxiv_to_ref(r) for r in search_arxiv(query, max_results=max_results)]
+    # The `arxiv` library is synchronous and paces its own requests, so
+    # calling it directly from an async handler blocks the event loop and
+    # serializes every other in-flight request behind it. An on-device check
+    # measured three concurrent calls taking 20.5s for exactly this reason.
+    results = await asyncio.to_thread(search_arxiv, query, max_results=max_results)
+    return [arxiv_to_ref(r) for r in results]
 
 
 async def tool_search_papers(query: str, max_results: int = 8) -> list[PaperRef]:
@@ -84,17 +90,27 @@ async def tool_resolve_paper(identifier: str) -> PaperRef:
 
     arxiv_match = _BARE_ARXIV_RE.match(identifier)
     if arxiv_match:
-        result = fetch_arxiv_by_id(arxiv_match.group(1))
+        result = await asyncio.to_thread(fetch_arxiv_by_id, arxiv_match.group(1))
         if result is not None:
             return arxiv_to_ref(result)
 
     doi_match = _DOI_RE.match(identifier)
     if doi_match or identifier.lower().startswith("ss:"):
-        prefixed = identifier if identifier.lower().startswith("ss:") else (
-            f"doi:{doi_match.group(1)}" if doi_match else identifier
+        prefixed = (
+            identifier
+            if identifier.lower().startswith("ss:")
+            else f"doi:{doi_match.group(1)}"
+            if doi_match
+            else identifier
         )
-        hit = await fetch_paper_metadata(prefixed)
-        if hit.s2_id or hit.title:
+        try:
+            hit = await fetch_paper_metadata(prefixed)
+        except NotFoundError:
+            # Semantic Scholar not having this DOI is not the end of the
+            # road — the title search below may still find the paper. Only
+            # fail once every route is exhausted.
+            hit = None
+        if hit is not None and (hit.s2_id or hit.title):
             return await _enrich_open_access(s2_to_ref(hit))
 
     hits = await search_papers(identifier, max_results=1)

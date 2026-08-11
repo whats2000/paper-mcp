@@ -25,6 +25,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from paper_mcp.models import (
+    NotFoundError,
     OpenAccess,
     PaperRef,
     RateLimitedError,
@@ -35,6 +36,14 @@ from paper_mcp.models import (
 )
 
 API_BASE = "https://api.semanticscholar.org/graph/v1"
+# "Similar papers" is a DIFFERENT service, not a graph endpoint.
+# `graph/v1/paper/{id}/related` does not exist and 404s with the misleading
+# "Paper with id <id>/related not found" — it reads the whole thing as an id.
+RECOMMENDATIONS_BASE = "https://api.semanticscholar.org/recommendations/v1"
+# The recommendations endpoint returns an EMPTY list unless `from` is given.
+# `all-cs` searches the full corpus; the default (`recent`) yields nothing for
+# older papers. Verified against the live API on 2026-08-11.
+_RECOMMENDATIONS_POOL = "all-cs"
 _TIMEOUT = httpx.Timeout(10.0)
 
 _MIN_INTERVAL_S = float(os.environ.get("PAPER_MCP_S2_MIN_INTERVAL_S", "1.1"))
@@ -142,6 +151,10 @@ def _raise_for_status(resp: httpx.Response, *, what: str) -> None:
             f"Semantic Scholar rate-limited {what}; retry shortly",
             retry_after=_parse_retry_after(resp.headers.get("retry-after")),
         )
+    if resp.status_code == 404:
+        # Semantic Scholar simply not having a paper is an ordinary answer,
+        # not an upstream fault — the caller can still fall back to a search.
+        raise NotFoundError(f"Semantic Scholar has no record for {what}")
     if resp.status_code >= 400:
         raise UpstreamError(
             f"Semantic Scholar returned HTTP {resp.status_code} for {what}: "
@@ -181,24 +194,34 @@ async def search_papers(query: str, max_results: int = 8) -> list[S2Hit]:
 
 
 async def find_related(paper_id: str, *, mode: Mode, max_results: int = 8) -> list[S2Hit]:
-    """Walk the citation graph around `paper_id`."""
-    upstream_id = s2_path_id(paper_id)
-    sub_key: str | None
-    match mode:
-        case "cites":
-            url, sub_key = f"{API_BASE}/paper/{upstream_id}/references", "citedPaper"
-        case "cited_by":
-            url, sub_key = f"{API_BASE}/paper/{upstream_id}/citations", "citingPaper"
-        case _:
-            url, sub_key = f"{API_BASE}/paper/{upstream_id}/related", None
+    """Find papers around `paper_id`: its references, its citers, or similar work.
 
-    resp = await _get_with_retry(
-        url, {"limit": str(clamp_max_results(max_results)), "fields": _GRAPH_FIELDS},
-    )
-    _raise_for_status(resp, what=f"find_related({paper_id!r}, {mode})")
+    `similar` goes to the Recommendations service; the other two are citation-
+    graph endpoints. They differ in base URL, required parameters, and the key
+    the results arrive under, so they cannot share one request shape.
+    """
+    upstream_id = s2_path_id(paper_id)
+    limit = str(clamp_max_results(max_results))
+    what = f"find_related({paper_id!r}, {mode})"
+
+    if mode == "similar":
+        resp = await _get_with_retry(
+            f"{RECOMMENDATIONS_BASE}/papers/forpaper/{upstream_id}",
+            {"limit": limit, "fields": _GRAPH_FIELDS, "from": _RECOMMENDATIONS_POOL},
+        )
+        _raise_for_status(resp, what=what)
+        recommended = resp.json().get("recommendedPapers") or []
+        return [_coerce(item) for item in recommended if item]
+
+    if mode == "cites":
+        url, sub_key = f"{API_BASE}/paper/{upstream_id}/references", "citedPaper"
+    else:
+        url, sub_key = f"{API_BASE}/paper/{upstream_id}/citations", "citingPaper"
+
+    resp = await _get_with_retry(url, {"limit": limit, "fields": _GRAPH_FIELDS})
+    _raise_for_status(resp, what=what)
     raw = resp.json().get("data") or []
-    items = [(r.get(sub_key) if sub_key else r) for r in raw]
-    return [_coerce(i) for i in items if i]
+    return [_coerce(item[sub_key]) for item in raw if item and item.get(sub_key)]
 
 
 async def fetch_paper_metadata(paper_id: str) -> S2Hit:
