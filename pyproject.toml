@@ -35,6 +35,14 @@ packages = ["src/paper_mcp"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The default run is fast and offline. Integration tests spawn a real server
+# and are opt-in via `-m integration`; the `network` subset also reaches real
+# arXiv / Semantic Scholar.
+addopts = "-m 'not integration'"
+markers = [
+    "integration: spawns a real paper-mcp process and drives it with an MCP client",
+    "network: reaches real external APIs (arXiv, Semantic Scholar, Unpaywall)",
+]
 
 [tool.ruff]
 line-length = 100

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import httpx
 import pytest
 import respx
@@ -106,6 +108,37 @@ async def test_server_error_raises_upstream_error() -> None:
 
     with pytest.raises(UpstreamError):
         await search_papers("transformer")
+
+
+@respx.mock
+async def test_upstream_error_carries_the_response_body() -> None:
+    # A bare status code once forced a manual probe of the live API to find
+    # out why a request was rejected. The upstream's own explanation must
+    # reach the caller.
+    respx.get(_SEARCH_URL).mock(
+        return_value=httpx.Response(
+            400, json={"error": "Unrecognized or unsupported fields: [authors.name]"}
+        )
+    )
+
+    with pytest.raises(UpstreamError, match=re.escape("authors.name")):
+        await search_papers("transformer")
+
+
+@respx.mock
+async def test_requests_plain_authors_not_the_dotted_subselection() -> None:
+    # Regression guard: /citations, /references and /related reject
+    # `authors.name` with HTTP 400 even though /paper/search accepts it.
+    # Plain `authors` is accepted by all of them.
+    route = respx.get(
+        "https://api.semanticscholar.org/graph/v1/paper/arXiv:1706.03762/citations"
+    ).mock(return_value=httpx.Response(200, json={"data": []}))
+
+    await find_related("arxiv:1706.03762", mode="cited_by")
+
+    fields = route.calls.last.request.url.params["fields"]
+    assert "authors" in fields
+    assert "authors.name" not in fields
 
 
 @respx.mock

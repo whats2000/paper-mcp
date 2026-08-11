@@ -27,11 +27,20 @@ identity degrades to a quota key.
 
 ```bash
 uv sync
-uv run pytest
+uv run pytest                    # fast, offline (integration excluded)
+uv run pytest -m integration     # spawns a real server, drives it with a real MCP client
 uv run ruff check src tests
 uv run mypy src
 uv run paper-mcp
 ```
+
+The integration suite is the one that matters for protocol correctness. It
+spawns an actual `paper-mcp` process and connects with the MCP client library,
+so it exercises the `initialize` handshake, transport framing, and the exact
+URL an operator pastes into a connector. It has already caught two bugs the
+in-process tests structurally could not see: a `307` redirect on `POST /mcp`
+(the in-process test client follows redirects), and a Semantic Scholar field
+name accepted by one endpoint and rejected by another.
 
 Verify it end to end:
 

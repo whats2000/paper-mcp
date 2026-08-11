@@ -46,9 +46,18 @@ _last_request_ts = 0.0
 _sleep = asyncio.sleep
 
 _USER_AGENT = "paper-mcp/0.1 (+https://github.com/whats2000/paper-mcp)"
+# `authors`, NOT `authors.name`. The citation-graph endpoints
+# (/citations, /references, /related) reject the dotted sub-selection with
+# HTTP 400 "Unrecognized or unsupported fields: [authors.name]", even though
+# /paper/search accepts it. Plain `authors` returns {authorId, name} objects
+# and is accepted everywhere, so one field set serves every endpoint.
+# Verified against the live API on 2026-08-11.
 _GRAPH_FIELDS = (
-    "paperId,title,abstract,year,authors.name,externalIds,openAccessPdf,venue,citationCount"
+    "paperId,title,abstract,year,authors,externalIds,openAccessPdf,venue,citationCount"
 )
+# How much of an error body to surface. Enough to name the cause (a bad
+# field, a bad id) without dumping an entire page into a tool result.
+_ERROR_BODY_CHARS = 300
 
 Mode = Literal["cites", "cited_by", "similar"]
 
@@ -121,6 +130,13 @@ async def _get_with_retry(url: str, params: dict[str, str]) -> httpx.Response:
 
 
 def _raise_for_status(resp: httpx.Response, *, what: str) -> None:
+    """Turn a non-2xx response into a typed, self-diagnosing error.
+
+    The body head is included deliberately. A bare "HTTP 400" forced a manual
+    probe of the upstream API to discover that one endpoint rejected a field
+    name another accepted; carrying the upstream's own explanation means the
+    next such failure explains itself in the tool result.
+    """
     if resp.status_code == 429:
         raise RateLimitedError(
             f"Semantic Scholar rate-limited {what}; retry shortly",
@@ -128,7 +144,8 @@ def _raise_for_status(resp: httpx.Response, *, what: str) -> None:
         )
     if resp.status_code >= 400:
         raise UpstreamError(
-            f"Semantic Scholar returned HTTP {resp.status_code} for {what}",
+            f"Semantic Scholar returned HTTP {resp.status_code} for {what}: "
+            f"{resp.text[:_ERROR_BODY_CHARS]}",
         )
 
 
