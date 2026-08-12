@@ -12,3 +12,4 @@ artifacts/
 .coverage
 coverage.xml
 htmlcov/
+.check-artifacts/

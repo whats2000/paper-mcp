@@ -53,6 +53,19 @@ def _image_ext(data: bytes) -> str:
     return ".png"
 
 
+def is_group_reference(fragment: str) -> bool:
+    """True for a Marker *Group* wrapper that only points at other blocks.
+
+    Marker emits `TableGroup` / `FigureGroup` blocks whose html is a
+    `<content-ref src='/page/5/Table/0'>` pointing at the real block, which
+    arrives separately. Treating one as a table produced three "table could
+    not be rendered" warnings on a real paper whose tables had in fact
+    rendered perfectly — a false alarm that tells an agent to distrust good
+    data, which is worse than silence.
+    """
+    return "<content-ref" in fragment and "<table" not in fragment.lower()
+
+
 def strip_html(fragment: str) -> str:
     """Plain text from a non-table HTML fragment, entities resolved."""
     text = _TAG_RE.sub(" ", fragment or "")
@@ -90,6 +103,11 @@ def marker_doc_to_bundle_parts(
 
     for block in doc.blocks:
         kind = block.block_type
+
+        # Group wrappers reference blocks that arrive separately; rendering
+        # them would duplicate content and warn about tables that are fine.
+        if is_group_reference(block.html):
+            continue
 
         if kind == "SectionHeader":
             parts.append(_heading(block))

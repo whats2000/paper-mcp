@@ -168,3 +168,53 @@ def test_figures_are_numbered_in_document_order(tmp_path: Path) -> None:
 
     assert [f.id for f in figures] == ["fig-001", "fig-002"]
     assert [f.caption for f in figures] == ["A", "B"]
+
+
+def test_group_wrappers_are_skipped_not_warned_about(tmp_path: Path) -> None:
+    """Marker's TableGroup points at a Table block that arrives separately.
+
+    Shape taken verbatim from a real extraction, where treating these as
+    tables produced three "could not be rendered" warnings for tables that
+    had in fact rendered perfectly. A false warning tells an agent to
+    distrust good data.
+    """
+    doc = _doc(
+        MarkerBlock(
+            block_type="TableGroup",
+            html="<content-ref src='/page/5/Table/0'></content-ref>",
+        ),
+        MarkerBlock(
+            block_type="Table",
+            html="<table><tr><th>A</th></tr><tr><td>1</td></tr></table>",
+        ),
+    )
+
+    markdown, _figures, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert warnings == []
+    assert "| A |" in markdown
+
+
+def test_figure_group_wrappers_are_skipped(tmp_path: Path) -> None:
+    doc = _doc(
+        MarkerBlock(
+            block_type="FigureGroup",
+            html="<content-ref src='/page/2/Figure/0'></content-ref>",
+            caption="wrapper",
+        ),
+        MarkerBlock(block_type="Figure", images={"a": _PNG}, caption="Real figure"),
+    )
+
+    _md, figures, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert [f.caption for f in figures] == ["Real figure"]
+    assert warnings == []
+
+
+def test_a_genuinely_broken_table_still_warns(tmp_path: Path) -> None:
+    # The skip must not swallow real failures.
+    doc = _doc(MarkerBlock(block_type="Table", html="<table></table>"))
+
+    _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert any("table" in w.lower() for w in warnings)
