@@ -37,16 +37,27 @@ uv run paper-mcp
 The interpreter is pinned in `.python-version` (3.13) so every contributor and
 the container build agree on one runtime (NFR-07).
 
-> **If uv warns `VIRTUAL_ENV=… does not match the project environment path .venv`:**
-> that is a stale `VIRTUAL_ENV` inherited from the shell that launched your
-> terminal, not a project misconfiguration. uv ignores it and correctly uses
-> `.venv`, so the warning is cosmetic. It is **not** fixed by pinning the
-> Python version — `.python-version` selects an interpreter, while the warning
-> compares `VIRTUAL_ENV` against the project environment path. There is no
-> `pyproject.toml` or `uv.toml` key that suppresses it. To silence it, either
-> start a shell with `VIRTUAL_ENV` unset, or pass `uv run --no-active …`
-> (a real flag, though `uv run --help` documents only its `--active`
-> counterpart; the `UV_NO_ACTIVE` environment variable does *not* work).
+> **If uv warns `VIRTUAL_ENV=… does not match the project environment path .venv`**
+> — and your editor reports this project's dependencies as "not installed" —
+> both have one cause: **VS Code's selected Python interpreter.**
+>
+> The Python extension exports the selected interpreter as `VIRTUAL_ENV` into
+> its terminals and into extension-spawned processes (which is how Claude Code's
+> shells inherit it). If that interpreter is a *bare* Python install rather than
+> a virtualenv — a uv-managed `…/uv/python/cpython-3.x…/python.exe`, say, which
+> has no `pyvenv.cfg` — then uv correctly refuses it and Pylance resolves
+> against an interpreter lacking this project's packages.
+>
+> `.vscode/settings.json` fixes it for this repo by pointing
+> `python.defaultInterpreterPath` at `${workspaceFolder}/.venv`; **reload the
+> window** for it to take effect. To fix it everywhere, repoint the user-level
+> `python.defaultInterpreterPath` in your VS Code settings.
+>
+> Things that do **not** fix it, tested: pinning `.python-version` (it selects
+> an interpreter; the warning compares environment *paths*), and
+> `UV_NO_ACTIVE=1`. There is no `pyproject.toml` or `uv.toml` key for it. The
+> ad-hoc escape is `uv run --no-active …` — a real flag, though `uv run --help`
+> documents only its `--active` counterpart.
 
 The integration suite is the one that matters for protocol correctness. It
 spawns an actual `paper-mcp` process and connects with the MCP client library,
