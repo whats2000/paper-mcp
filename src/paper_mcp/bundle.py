@@ -16,7 +16,13 @@ from pydantic import BaseModel, Field
 
 from paper_mcp.models import PaperRef
 
-ExtractionEngine = Literal["latex", "marker", "pymupdf"]
+# No `pymupdf` member, deliberately. PaperHub shipped crude PyMuPDF document
+# extraction once and reversed it — its v2.19 entry records the output as
+# "conference-UNusable" (hallucinated \includegraphics, wrong figures from
+# filename collisions) — and replaced it with Marker. A service whose value is
+# faithful extraction must not offer an unfaithful fallback, so when Marker is
+# unavailable a PDF fetch fails loudly instead of degrading (SRS v0.2).
+ExtractionEngine = Literal["latex", "marker"]
 
 
 class FigureRef(BaseModel):

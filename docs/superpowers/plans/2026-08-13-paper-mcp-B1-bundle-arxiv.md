@@ -6,7 +6,7 @@
 
 **Architecture:** A content-addressed artifact store on disk keyed `arxiv:<id>` / `sha256:<hex>`. The arXiv-LaTeX path is synchronous (seconds); PDF extraction and the job model are deliberately **deferred to B2**, so this plan ships one complete, fast path rather than half of three.
 
-**Tech Stack:** Existing Phase A stack + `pymupdf` (B2) — B1 needs no new runtime dependency beyond the stdlib `tarfile`/`zipfile`.
+**Tech Stack:** Existing Phase A stack + `pymupdf`, used solely to rasterize vector *figure files* (`.pdf`/`.eps` referenced by `\includegraphics`) into PNGs. That is image conversion of one already-identified figure, not document extraction — PDF *understanding* is Marker's job and Marker's alone (SRS v0.2).
 
 ## Global Constraints
 
@@ -20,7 +20,7 @@ Everything from Plan A's Global Constraints applies unchanged (uv only, `mypy --
 
 | In B1 | Deferred to B2 |
 | --- | --- |
-| Artifact store + TTL sweep | PDF extraction (PyMuPDF, Marker) |
+| Artifact store + TTL sweep | PDF extraction (Marker, required) |
 | arXiv e-print source download | Job store + `get_job` |
 | LaTeX → sections/figures/equations | `fetch_paper(url=...)` for arbitrary PDFs |
 | `fetch_paper` (sync, arXiv) · `get_section` | Unpaywall-sourced PDF ingestion |
@@ -51,7 +51,7 @@ Everything from Plan A's Global Constraints applies unchanged (uv only, `mypy --
 - `class SectionContent(BaseModel)`: `bundle_id, name, order, markdown`
 - `class ArtifactRef(BaseModel)`: `zip_url, bytes, expires_at`
 - `class Bundle(BaseModel)`: `bundle_id, paper: PaperRef, sections: list[SectionRef], figures, equations, extraction: ExtractionInfo, artifact: ArtifactRef | None`
-- `class ExtractionInfo(BaseModel)`: `engine: Literal["latex","marker","pymupdf"]`, `warnings: list[str]`
+- `class ExtractionInfo(BaseModel)`: `engine: Literal["latex","marker"]`, `warnings: list[str]`
 - `def outline(bundle: Bundle) -> Bundle` — returns a copy with every `SectionRef.markdown` set to `None`
 
 - [ ] **Step 1: Write the failing test**
