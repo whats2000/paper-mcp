@@ -1,0 +1,64 @@
+# paper-mcp — service + Marker.
+#
+# Marker is a REQUIRED component, not an opt-in profile (SRS v0.2). PDF
+# extraction is the product: PaperHub shipped crude PyMuPDF extraction once,
+# measured the output as "conference-UNusable", and replaced it with Marker.
+# A host without a GPU can still serve discovery and LaTeX compilation, but a
+# PDF fetch reports `extraction_unavailable` rather than degrading silently.
+services:
+  paper-mcp:
+    build: .
+    image: paper-mcp
+    ports: ["8000:8000"]
+    environment:
+      - PAPER_MCP_HOST=0.0.0.0
+      - PAPER_MCP_PORT=8000
+      - PAPER_MCP_MARKER_URL=http://marker:8002
+      # Per-request page batching bounds VRAM. VRAM scales with page CONTENT
+      # DENSITY, not page count: PaperHub measured a single dense two-column
+      # page producing 200+ Surya OCR lines and saturating 6 GB, and a 5-page
+      # batch taking 21 minutes. Raise only on a bigger GPU.
+      - PAPER_MCP_MARKER_MAX_PAGES=1
+      - PAPER_MCP_ARTIFACT_ROOT=/app/artifacts
+      # A public deployment MUST name its own hostname here, or every request
+      # is rejected with 421 by DNS-rebinding protection.
+      - PAPER_MCP_ALLOWED_HOSTS=${PAPER_MCP_ALLOWED_HOSTS:-localhost:8000,127.0.0.1:8000}
+      - PAPER_MCP_LOG_LEVEL=${PAPER_MCP_LOG_LEVEL:-warning}
+    volumes:
+      - paper-mcp-artifacts:/app/artifacts
+    depends_on:
+      - marker
+    restart: unless-stopped
+
+  # ── Marker extraction ─────────────────────────────────────────────────────
+  # Ported from PaperHub's marker_service @ fd65834.
+  marker:
+    build: ./marker_service
+    image: paper-mcp-marker
+    ports: ["8002:8002"]
+    environment:
+      # Marker's use_llm accuracy pass materially improves tables, math and
+      # layout. It is an internal quality knob on a deterministic pipeline —
+      # never exposed as a tool — and the service runs keyless without it
+      # (SRS §I-7).
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - MARKER_MAX_PAGES=1
+    volumes:
+      # ~2 GB of Surya weights download once and persist across image
+      # rebuilds; without this every rebuild re-downloads them.
+      - marker-models:/models
+    restart: unless-stopped
+    # GPU passthrough. Requires the NVIDIA container toolkit on the host;
+    # Marker falls back to CPU automatically if unavailable, which is far too
+    # slow to be useful but does not crash.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  paper-mcp-artifacts:
+  marker-models:
