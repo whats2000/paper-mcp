@@ -134,7 +134,10 @@ def marker_doc_to_bundle_parts(
             else:
                 # Falling back to stripped text would produce the cell-blob
                 # this pipeline exists to avoid, so flag it instead.
-                warnings.append("a table could not be rendered as markdown")
+                # Carry the shape that defeated the renderer: a bare "could
+                # not render" is undiagnosable without another GPU run.
+                head = re.sub(r"\s+", " ", block.html or "")[:200]
+                warnings.append(f"table not rendered as markdown; html head: {head!r}")
             continue
 
         if kind == "Equation":

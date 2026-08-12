@@ -191,9 +191,9 @@ async def run(arxiv_id: str, base: str) -> None:
             image_url = figures[0].get("image_url")
             try:
                 resp = httpx.get(image_url, timeout=30.0)
-                ok = resp.status_code == 200 and resp.content[:4] in [
-                    m[:4] for m in _IMAGE_MAGIC
-                ]
+                ok = resp.status_code == 200 and any(
+                    resp.content.startswith(magic) for magic in _IMAGE_MAGIC
+                )
                 record(
                     "PASS" if ok else "FAIL",
                     "figure image downloads and is a real image",
@@ -240,8 +240,10 @@ async def main() -> int:
         return 2
 
     port = free_port()
+    keep = os.environ.get("PAPER_MCP_CHECK_ARTIFACTS")
     with tempfile.TemporaryDirectory() as tmp:
-        proc, log = boot(port, Path(tmp) / "artifacts")
+        artifacts = Path(keep) if keep else Path(tmp) / "artifacts"
+        proc, log = boot(port, artifacts)
         base = f"http://127.0.0.1:{port}"
         try:
             for _ in range(150):
@@ -258,6 +260,7 @@ async def main() -> int:
             except subprocess.TimeoutExpired:
                 proc.kill()
 
+    print(f"artifacts: {artifacts}")
     failures = sum(1 for s, _, _ in _results if s == "FAIL")
     passes = sum(1 for s, _, _ in _results if s == "PASS")
     print(f"\n{'=' * 72}\n{passes} passed, {failures} failed\n{'=' * 72}")
