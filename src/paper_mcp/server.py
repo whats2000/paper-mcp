@@ -187,6 +187,17 @@ def create_app() -> FastAPI:
 _UVICORN_LEVELS = frozenset({"critical", "error", "warning", "info", "debug", "trace"})
 
 
+def stdlib_log_level(level: str) -> int:
+    """Translate the configured level for `logging.basicConfig`.
+
+    The stdlib accepts only upper-case names and raises `ValueError: Unknown
+    level: 'info'` on anything else — which kills the process at boot, before
+    any log line explains why. Lower-case is the natural thing to write in a
+    compose file (this project's own compose file did), so it must work.
+    """
+    return getattr(logging, level.strip().upper(), logging.INFO)
+
+
 def uvicorn_log_level(level: str) -> str:
     """Translate the configured level into what uvicorn will accept.
 
@@ -207,7 +218,7 @@ def uvicorn_log_level(level: str) -> str:
 def main() -> None:
     """Console-script entry point."""
     cfg = settings()
-    logging.basicConfig(level=cfg.log_level)
+    logging.basicConfig(level=stdlib_log_level(cfg.log_level))
     if cfg.auth_mode == "open":
         _LOG.warning(
             "AUTH_MODE=open — every caller is unauthenticated. "

@@ -139,3 +139,29 @@ def test_log_level_is_translated_for_uvicorn(configured: str, expected: str) -> 
     from paper_mcp.server import uvicorn_log_level
 
     assert uvicorn_log_level(configured) == expected
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_name"),
+    [
+        ("INFO", "INFO"),
+        ("info", "INFO"),
+        ("  warning ", "WARNING"),
+        ("DEBUG", "DEBUG"),
+        ("nonsense", "INFO"),
+    ],
+)
+def test_stdlib_log_level_accepts_lowercase(configured: str, expected_name: str) -> None:
+    """A lower-case level must not kill the process at boot.
+
+    logging.basicConfig raises ValueError: Unknown level: 'info' on anything
+    that is not upper-case, and it does so before any log line can explain
+    why. This project's own docker-compose.yml wrote `warning`, so the
+    container would have crashed on first boot; the real-workflow check
+    caught it, the unit suite did not.
+    """
+    import logging as _logging
+
+    from paper_mcp.server import stdlib_log_level
+
+    assert stdlib_log_level(configured) == getattr(_logging, expected_name)
