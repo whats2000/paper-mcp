@@ -34,6 +34,20 @@ uv run mypy src
 uv run paper-mcp
 ```
 
+The interpreter is pinned in `.python-version` (3.13) so every contributor and
+the container build agree on one runtime (NFR-07).
+
+> **If uv warns `VIRTUAL_ENV=… does not match the project environment path .venv`:**
+> that is a stale `VIRTUAL_ENV` inherited from the shell that launched your
+> terminal, not a project misconfiguration. uv ignores it and correctly uses
+> `.venv`, so the warning is cosmetic. It is **not** fixed by pinning the
+> Python version — `.python-version` selects an interpreter, while the warning
+> compares `VIRTUAL_ENV` against the project environment path. There is no
+> `pyproject.toml` or `uv.toml` key that suppresses it. To silence it, either
+> start a shell with `VIRTUAL_ENV` unset, or pass `uv run --no-active …`
+> (a real flag, though `uv run --help` documents only its `--active`
+> counterpart; the `UV_NO_ACTIVE` environment variable does *not* work).
+
 The integration suite is the one that matters for protocol correctness. It
 spawns an actual `paper-mcp` process and connects with the MCP client library,
 so it exercises the `initialize` handshake, transport framing, and the exact
