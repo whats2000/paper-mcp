@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 _DEFAULT_ALLOWED_HOSTS = ("localhost", "localhost:8000", "127.0.0.1", "127.0.0.1:8000")
 
@@ -18,6 +19,14 @@ class Settings:
     allowed_origins: tuple[str, ...]
     host: str
     port: int
+    marker_url: str
+    # VRAM scales with page CONTENT DENSITY, not page count: PaperHub measured
+    # a single dense two-column page producing 200+ Surya OCR lines and
+    # saturating 6 GB, and a 5-page batch taking 21 minutes. 1 is the safe
+    # default on a small card; raise it on a bigger GPU.
+    marker_max_pages: int
+    artifact_root: Path
+    artifact_ttl_hours: float
 
 
 def _csv(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -49,4 +58,8 @@ def settings() -> Settings:
         # whatever else already owns the port.
         host=os.environ.get("PAPER_MCP_HOST", "0.0.0.0"),
         port=int(os.environ.get("PAPER_MCP_PORT", "8000")),
+        marker_url=os.environ.get("PAPER_MCP_MARKER_URL", "http://127.0.0.1:8002"),
+        marker_max_pages=int(os.environ.get("PAPER_MCP_MARKER_MAX_PAGES", "1")),
+        artifact_root=Path(os.environ.get("PAPER_MCP_ARTIFACT_ROOT", "artifacts")),
+        artifact_ttl_hours=float(os.environ.get("PAPER_MCP_ARTIFACT_TTL_HOURS", "24")),
     )

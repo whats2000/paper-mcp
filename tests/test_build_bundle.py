@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import base64
+import zipfile
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from paper_mcp.artifacts import ArtifactStore
+from paper_mcp.models import InvalidArgumentError, PaperRef
+from paper_mcp.pipelines import build_bundle as bb
+from paper_mcp.pipelines.build_bundle import build_bundle, bundle_key, load_cached
+from paper_mcp.pipelines.marker_client import MarkerBlock, MarkerDoc
+
+_PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 32).decode()
+_PAPER = PaperRef(paper_id="arxiv:1706.03762", title="Attention", source="arxiv",
+                  arxiv_id="1706.03762")
+
+
+class _FakeMarker:
+    """Stands in for the Marker service; records how it was called."""
+
+    def __init__(self, doc: MarkerDoc) -> None:
+        self.doc = doc
+        self.calls = 0
+
+    async def extract(self, pdf_bytes: bytes, *, max_pages: int | None = None) -> MarkerDoc:
+        self.calls += 1
+        return self.doc
+
+
+def _doc() -> MarkerDoc:
+    return MarkerDoc(
+        blocks=[
+            MarkerBlock(block_type="SectionHeader", html="<h1>Introduction</h1>"),
+            MarkerBlock(block_type="Text", html="<p>We propose the Transformer.</p>"),
+            MarkerBlock(
+                block_type="Table",
+                html="<table><tr><th>Model</th><th>BLEU</th></tr>"
+                "<tr><td>Base</td><td>27.3</td></tr></table>",
+            ),
+            MarkerBlock(block_type="Equation", latex=r"E = mc^2"),
+            MarkerBlock(block_type="Figure", images={"a": _PNG}, caption="Architecture", page=3),
+        ]
+    )
+
+
+@pytest.fixture
+def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _pdf(arxiv_id: str, **_: Any) -> bytes:
+        return b"%PDF-1.7\nfake"
+
+    monkeypatch.setattr(bb, "fetch_arxiv_pdf", _pdf)
+    monkeypatch.setattr(bb, "page_count", lambda _data: 15)
+
+
+async def test_builds_a_bundle_with_markdown_and_a_figure_index(
+    tmp_path: Path, _no_network: None
+) -> None:
+    store = ArtifactStore(tmp_path)
+    marker = _FakeMarker(_doc())
+
+    bundle = await build_bundle(_PAPER, store=store, marker=marker)  # type: ignore[arg-type]
+
+    assert "## Introduction" in bundle.markdown
+    assert "| Model | BLEU |" in bundle.markdown  # tables survive as tables
+    assert "$$" in bundle.markdown  # equations stay LaTeX
+    assert len(bundle.figures) == 1
+    assert bundle.extraction.engine == "marker"
+    assert bundle.extraction.pages == 15
+
+
+async def test_figure_urls_resolve_through_the_store(
+    tmp_path: Path, _no_network: None
+) -> None:
+    store = ArtifactStore(tmp_path)
+
+    bundle = await build_bundle(_PAPER, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
+
+    figure = bundle.figures[0]
+    assert figure.image_url is not None
+    token = figure.image_url.split("/a/")[1].split("/")[0]
+    # The URL is not decoration: it must address a real file.
+    assert store.resolve(token, figure.image_path).is_file()
+
+
+async def test_a_second_call_is_a_cache_hit_and_does_not_re_extract(
+    tmp_path: Path, _no_network: None
+) -> None:
+    store = ArtifactStore(tmp_path)
+    marker = _FakeMarker(_doc())
+
+    first = await build_bundle(_PAPER, store=store, marker=marker)  # type: ignore[arg-type]
+    second = await build_bundle(_PAPER, store=store, marker=marker)  # type: ignore[arg-type]
+
+    assert marker.calls == 1  # the GPU ran once
+    assert second.bundle_id == first.bundle_id
+    assert second.markdown == first.markdown
+
+
+async def test_the_zip_contains_the_full_markdown_and_figures(
+    tmp_path: Path, _no_network: None
+) -> None:
+    store = ArtifactStore(tmp_path)
+
+    bundle = await build_bundle(_PAPER, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
+
+    assert bundle.artifact is not None
+    zip_path = store.dir_for(bundle.bundle_id) / "bundle.zip"
+    with zipfile.ZipFile(zip_path) as archive:
+        names = archive.namelist()
+    assert "markdown.md" in names
+    assert any(n.startswith("figures/") for n in names)
+    assert "bundle.zip" not in names  # never packs itself
+
+
+async def test_extraction_warnings_reach_the_caller(
+    tmp_path: Path, _no_network: None
+) -> None:
+    # A figure Marker could not extract must be visible, not silently absent.
+    doc = MarkerDoc(blocks=[MarkerBlock(block_type="Figure", caption="ghost", images={})])
+    store = ArtifactStore(tmp_path)
+
+    bundle = await build_bundle(_PAPER, store=store, marker=_FakeMarker(doc))  # type: ignore[arg-type]
+
+    assert any("ghost" in w for w in bundle.extraction.warnings)
+
+
+async def test_an_empty_extraction_is_flagged(tmp_path: Path, _no_network: None) -> None:
+    store = ArtifactStore(tmp_path)
+
+    bundle = await build_bundle(_PAPER, store=store, marker=_FakeMarker(MarkerDoc(blocks=[])))  # type: ignore[arg-type]
+
+    assert any("no text" in w for w in bundle.extraction.warnings)
+
+
+async def test_a_marker_failure_leaves_no_cache_entry(
+    tmp_path: Path, _no_network: None
+) -> None:
+    # bundle.json is written last, so an interrupted run reads as a miss and
+    # is retried rather than served as a truncated paper.
+    class _Broken:
+        async def extract(self, pdf_bytes: bytes, *, max_pages: int | None = None) -> MarkerDoc:
+            raise RuntimeError("marker died")
+
+    store = ArtifactStore(tmp_path)
+
+    with pytest.raises(RuntimeError):
+        await build_bundle(_PAPER, store=store, marker=_Broken())  # type: ignore[arg-type]
+
+    assert load_cached(bundle_key(_PAPER), store=store) is None
+
+
+def test_a_paper_without_an_arxiv_id_is_a_clear_error() -> None:
+    closed = PaperRef(paper_id="ss:abc123", title="Closed", source="semantic_scholar")
+
+    with pytest.raises(InvalidArgumentError, match="arXiv"):
+        bundle_key(closed)
+
+
+def test_a_corrupt_cache_entry_reads_as_a_miss(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    entry = store.ensure("arxiv:1")
+    (entry / "bundle.json").write_text("{not json", encoding="utf-8")
+
+    assert load_cached("arxiv:1", store=store) is None
