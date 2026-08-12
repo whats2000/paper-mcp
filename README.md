@@ -71,7 +71,7 @@ identity degrades to a quota key.
 | Tool | Phase | Status |
 | --- | --- | --- |
 | `search_arxiv` · `search_papers` · `find_related` · `resolve_paper` | A | ✅ shipped |
-| `fetch_paper` · `get_job` + artifact serving | B | ✅ built, pending real-Marker verification |
+| `fetch_paper` · `get_job` + artifact serving | B | ✅ shipped — verified against real Marker |
 | `compile_latex` (sandboxed, a tool — not a flow) | C | planned |
 | OIDC auth + quota | D | planned |
 | Portable skills (examples, not the product) | E | planned |

@@ -29,11 +29,11 @@ Plan A's constraints hold (uv, `mypy --strict`, Pydantic v2, provenance headers,
 | `html_to_markdown.py` — real markdown tables | ✅ done |
 | `marker_to_bundle.py` — blocks → markdown + figures | ✅ done (12 tests) |
 | `marker_service/` + `docker-compose.yml` | ✅ done |
-| **Task 1** — arXiv PDF acquisition | ⬜ |
-| **Task 2** — job store + `get_job` | ⬜ |
-| **Task 3** — bundle assembly + cache | ⬜ |
-| **Task 4** — `fetch_paper` + artifact route + server wiring | ⬜ |
-| **Task 5** — on-device verification against real Marker | ⬜ |
+| **Task 1** — arXiv PDF acquisition | ✅ done (7 tests) |
+| **Task 2** — job store + `get_job` | ✅ done (8 tests) |
+| **Task 3** — bundle assembly + cache | ✅ done (9 tests) |
+| **Task 4** — `fetch_paper` + artifact route + server wiring | ✅ done |
+| **Task 5** — on-device verification against real Marker | ✅ **12 passed, 0 failed** |
 
 ---
 
@@ -96,3 +96,39 @@ Flow: content key → cache hit returns immediately → else fetch PDF → Marke
 4. Verify fixtures against the live API before trusting a red result.
 5. `cmd | tail` reports **tail's** exit code — use `set -o pipefail`.
 6. The unit suite is necessary, never sufficient.
+
+
+---
+
+## Outcome — verified 2026-08-13
+
+`scripts/paper_workflow_check.py 1706.03762`, cold cache, against the real
+Marker container:
+
+```
+extraction completed             332s (15 pages)
+markdown has substance           43,358 chars
+structure survived as headings   26 headings
+tables survived as markdown      58 table rows, separator present
+equations survived as LaTeX      10 display-math blocks
+figure index populated           6 figures, 6/6 captioned
+figure image downloads           HTTP 200, 66,822 bytes, real JPEG
+extraction warnings              none
+second call is a cache hit       0.01s
+artifact route refuses traversal HTTP 404
+```
+
+Three defects the unit suite could not have found, each caught by this check:
+
+1. **`PAPER_MCP_LOG_LEVEL=info` crashed the server at boot** — `basicConfig`
+   rejects lower case. This project's own compose file used `warning`, so the
+   container would have died on first start.
+2. **The check's own image-magic comparison was wrong**, reporting a valid
+   JPEG as not-an-image.
+3. **Three tables were falsely reported unrenderable.** The enriched warning
+   showed the cause: Marker `TableGroup` wrappers whose html is a
+   `<content-ref>` pointing at the real table block. The tables had rendered
+   correctly all along; a false "data missing" warning is worse than none.
+
+Only (1) and (3) were product defects, and neither was reachable without
+running the real workflow against real Marker.
