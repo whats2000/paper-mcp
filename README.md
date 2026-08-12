@@ -89,7 +89,7 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_AUTH_MODE` | `open` | `open` disables authentication — development only |
 | `PAPER_MCP_UNPAYWALL_EMAIL` | unset | Contact email enabling Unpaywall open-access lookup in `resolve_paper` |
 | `PAPER_MCP_S2_API_KEY` | unset | **Effectively required in production** — see below |
-| `PAPER_MCP_LOG_LEVEL` | `INFO` | Log level |
+| `PAPER_MCP_LOG_LEVEL` | `INFO` | Log level, applied to uvicorn too. `WARNING` drops per-request access logging: measured 18,222 → 114 bytes over 300 requests. Worth setting for a public deployment — a server whose stdout backs up blocks inside `write()`, and per-request logging is what fills the buffer |
 
 ### Semantic Scholar needs an API key
 
