@@ -14,27 +14,36 @@ skills. This service's only job is to make each step precise.
 
 ## What you get
 
-```jsonc
-fetch_paper("arxiv:1706.03762") →
-{
-  "markdown": "## Introduction
+`fetch_paper("arxiv:1706.03762")` returns the paper as markdown —
 
-The dominant sequence transduction models…
+```markdown
+## Introduction
 
+The dominant sequence transduction models are based on complex recurrent…
 
-               | Model | BLEU |
+| Model | BLEU |
 | --- | --- |
 | Base | 27.3 |
+| Big  | 28.4 |
 
+$$
+\mathrm{Attention}(Q,K,V) = \mathrm{softmax}(QK^T/\sqrt{d_k})V
+$$
 
-               $$
-\mathrm{Attention}(Q,K,V)=…
-$$",
-  "figures": [
-    { "id": "fig-001", "caption": "The Transformer architecture.",
-      "page": 3, "image_url": "https://…/a/<token>/figures/fig-001.png" }
-  ]
-}
+![fig-001](figures/fig-001.png)
+
+*fig-001: The Transformer architecture.*
+```
+
+— alongside the figure index:
+
+```jsonc
+"figures": [
+  { "id": "fig-001",
+    "caption": "The Transformer architecture.",
+    "page": 3,
+    "image_url": "https://…/a/<token>/figures/fig-001.png" }
+]
 ```
 
 Extraction is **Marker**, and only Marker. Three guarantees, each asserted by
@@ -53,13 +62,11 @@ with Marker; a service whose value is faithful extraction must not quietly
 substitute unfaithful extraction. Without Marker, a PDF fetch reports
 `extraction_unavailable` rather than degrading.
 
-That last part is the security architecture, not an omission. With no per-user
+Statelessness is the security architecture, not an omission. With no per-user
 state, a shared public endpoint has nothing to leak between callers, and
 identity degrades to a quota key.
 
 ## Status
-
-**Phase A complete** — the four discovery tools are live over MCP.
 
 | Tool | Phase | Status |
 | --- | --- | --- |
@@ -149,6 +156,10 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_AUTH_MODE` | `open` | `open` disables authentication — development only |
 | `PAPER_MCP_UNPAYWALL_EMAIL` | unset | Contact email enabling Unpaywall open-access lookup in `resolve_paper` |
 | `PAPER_MCP_S2_API_KEY` | unset | **Effectively required in production** — see below |
+| `PAPER_MCP_MARKER_URL` | `http://127.0.0.1:8002` | Marker service. **Required for extraction** — without it `fetch_paper` reports the dependency rather than degrading |
+| `PAPER_MCP_MARKER_MAX_PAGES` | `1` | Pages per Marker call. VRAM scales with page *content density*, not page count: one dense two-column page can saturate 6 GB, and a 5-page batch was measured at 21 minutes. Raise only on a bigger GPU |
+| `PAPER_MCP_ARTIFACT_ROOT` | `artifacts` | Content-addressed cache for bundles and figure images |
+| `PAPER_MCP_ARTIFACT_TTL_HOURS` | `24` | How long artifacts survive before the sweeper reclaims them |
 | `PAPER_MCP_LOG_LEVEL` | `INFO` | Log level, applied to uvicorn too. `WARNING` drops per-request access logging: measured 18,222 → 114 bytes over 300 requests. Worth setting for a public deployment — a server whose stdout backs up blocks inside `write()`, and per-request logging is what fills the buffer |
 
 ### Semantic Scholar needs an API key
