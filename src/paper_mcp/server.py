@@ -23,6 +23,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from paper_mcp import __version__
+from paper_mcp.api.artifacts import router as artifacts_router
 from paper_mcp.config import Settings, settings
 from paper_mcp.tools.discovery import (
     tool_find_related,
@@ -30,6 +31,7 @@ from paper_mcp.tools.discovery import (
     tool_search_arxiv,
     tool_search_papers,
 )
+from paper_mcp.tools.fetch import marker_client, tool_fetch_paper, tool_get_job
 
 _LOG = logging.getLogger(__name__)
 
@@ -72,6 +74,28 @@ def build_mcp_server() -> MCPServer[Any]:
             "references, 'cited_by' for follow-up work, 'similar' for related "
             "papers. paper_id must be prefixed: arxiv:<id>, ss:<paperId>, or "
             "doi:<doi>. Network scope: api.semanticscholar.org."
+        ),
+    )
+    server.add_tool(
+        tool_fetch_paper,
+        name="fetch_paper",
+        description=(
+            "Fetch a paper as agent-ready data: the full text as markdown (real "
+            "tables, equations as LaTeX, headings intact) plus a figure index of "
+            "ids, captions and image URLs. Extraction is by Marker. Returns the "
+            "bundle immediately when cached, otherwise a job handle — a dense "
+            "paper takes roughly a minute per page. Accepts an arXiv id "
+            "(arxiv:1706.03762 or 1706.03762). Network scope: arxiv.org and the "
+            "Marker service; writes only to the artifact cache."
+        ),
+    )
+    server.add_tool(
+        tool_get_job,
+        name="get_job",
+        description=(
+            "Check a background extraction started by fetch_paper. Returns state "
+            "(queued/running/done/error). When done, call fetch_paper again to "
+            "get the bundle from cache. No network scope."
         ),
     )
     server.add_tool(
@@ -144,12 +168,17 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
+        # Marker is required, not optional (SRS v0.2): if it is down, PDF
+        # extraction fails outright rather than degrading, so an operator
+        # needs to see that here rather than discover it per request.
         return {
             "status": "ok",
             "version": __version__,
             "auth_mode": settings().auth_mode,
+            "marker": "up" if await marker_client().healthy() else "down",
         }
 
+    app.include_router(artifacts_router)
     app.mount("", mcp_app)
     return app
 
