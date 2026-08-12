@@ -1,12 +1,17 @@
-"""The bundle — this service's core artifact.
+"""The bundle — a paper an LLM agent can use immediately.
 
-Derived from PaperHub's `PaperAsset` (figures / equations / sections) and
-extended with what an agent actually needs over the wire: section markdown,
-resolvable figure URLs, and extraction provenance.
+Two things, because two things are what an agent actually needs:
 
-The bundle is the figure-grounding contract (SRS §III-3): an agent that cites
-`fig-001` is citing something the extractor genuinely found, with a caption
-and a URL that resolves.
+* `markdown` — the paper as readable text, with real tables and equations as
+  LaTeX. Marker produces it; nothing here re-derives or "improves" it.
+* `figures` — the figure index: an id, a caption, and a URL that resolves to
+  the extracted image.
+
+Deliberately not here: a section index, an equation index, and an
+outline/full duality. Marker emits `##` headings, so an agent navigates the
+markdown itself; it inlines equations as LaTeX, so a parallel index would be
+a second copy to keep honest. PaperHub needed those because it drove a
+citation canvas over character offsets. This service does not.
 """
 from __future__ import annotations
 
@@ -22,49 +27,34 @@ from paper_mcp.models import PaperRef
 # filename collisions) — and replaced it with Marker. A service whose value is
 # faithful extraction must not offer an unfaithful fallback, so when Marker is
 # unavailable a PDF fetch fails loudly instead of degrading (SRS v0.2).
-ExtractionEngine = Literal["latex", "marker"]
+ExtractionEngine = Literal["marker"]
+
+# Cap on inlined markdown. Not a feature — a guard: a long paper can exceed
+# 300k characters, and an MCP client that has to buffer that in one response
+# is a client that falls over. The full text always lives in the artifact zip.
+MARKDOWN_INLINE_LIMIT = 200_000
 
 
 class FigureRef(BaseModel):
-    """One figure, with everything needed to cite or fetch it."""
+    """One extracted figure: what it shows, and where to get it.
+
+    The index is the grounding contract. An entry exists only when Marker
+    actually extracted an image, so an agent citing `fig-001` is citing
+    something that demonstrably exists — and the caption is what makes it
+    usable without fetching the pixels.
+    """
 
     id: str
     caption: str = ""
     page: int | None = None
-    section: str | None = None
     image_path: str = Field(description="Path inside the bundle zip, e.g. figures/fig-001.png")
-    image_url: str | None = Field(
-        default=None, description="Resolvable URL for the image, when the artifact is live."
-    )
+    image_url: str | None = None
 
 
-class EquationRef(BaseModel):
-    id: str
-    latex: str
-    section: str | None = None
-
-
-class SectionRef(BaseModel):
-    """A section in the bundle's index.
-
-    `markdown` is populated only for `include="full"`; an outline carries the
-    name, order, and size so a caller can choose what to read next without
-    paying for the whole paper.
-    """
-
-    name: str
-    order: int
-    char_count: int = 0
-    markdown: str | None = None
-
-
-class SectionContent(BaseModel):
-    """One section, returned by `get_section`."""
-
-    bundle_id: str
-    name: str
-    order: int
-    markdown: str
+class ExtractionInfo(BaseModel):
+    engine: ExtractionEngine = "marker"
+    pages: int = 0
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ArtifactRef(BaseModel):
@@ -73,42 +63,32 @@ class ArtifactRef(BaseModel):
     expires_at: str | None = None
 
 
-class ExtractionInfo(BaseModel):
-    """Which engine produced this bundle, and what degraded on the way.
-
-    Warnings are part of the contract rather than a log line: LaTeX-to-markdown
-    is lossy for tables and custom macros, and a caller reasoning about the
-    text deserves to know that before it trusts a table it cannot see.
-    """
-
-    engine: ExtractionEngine
-    warnings: list[str] = Field(default_factory=list)
-
-
 class Bundle(BaseModel):
-    """Agent-ready representation of one paper."""
+    """A paper, ready for an agent to read."""
 
     bundle_id: str = Field(description="arxiv:<id> | sha256:<hex>")
     paper: PaperRef
-    sections: list[SectionRef] = Field(default_factory=list)
+    markdown: str = ""
+    markdown_truncated: bool = Field(
+        default=False,
+        description="True when markdown was capped; the full text is in the artifact zip.",
+    )
     figures: list[FigureRef] = Field(default_factory=list)
-    equations: list[EquationRef] = Field(default_factory=list)
-    extraction: ExtractionInfo
+    extraction: ExtractionInfo = Field(default_factory=ExtractionInfo)
     artifact: ArtifactRef | None = None
 
 
-def outline(bundle: Bundle) -> Bundle:
-    """Return a copy with section bodies removed, keeping the index.
+def cap_markdown(text: str, limit: int = MARKDOWN_INLINE_LIMIT) -> tuple[str, bool]:
+    """Trim inlined markdown to `limit`, reporting whether it was trimmed.
 
-    A full paper's markdown routinely exceeds 100k characters. Returning that
-    by default would flood the caller's context on its first call, so
-    `fetch_paper` defaults to the outline and `get_section` fetches bodies on
-    demand — the structural navigation PaperHub validated (SRS §III-3).
-
-    Copies rather than mutating: the caller may still want the full bundle it
-    passed in, and silently emptying it would be a nasty surprise.
+    Cuts on a line boundary so the tail is not a half-sentence, and never
+    silently: the caller sets `markdown_truncated` so an agent knows to reach
+    for the zip rather than assume it has the whole paper.
     """
-    trimmed = bundle.model_copy(deep=True)
-    for section in trimmed.sections:
-        section.markdown = None
-    return trimmed
+    if len(text) <= limit:
+        return text, False
+    clipped = text[:limit]
+    boundary = clipped.rfind("\n")
+    if boundary > limit // 2:
+        clipped = clipped[:boundary]
+    return clipped, True
