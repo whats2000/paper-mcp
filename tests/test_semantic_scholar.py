@@ -262,3 +262,77 @@ def test_s2_to_ref_reports_absent_open_access_with_a_reason() -> None:
     assert ref.paper_id == "ss:abc123"
     assert ref.open_access.available is False
     assert ref.open_access.reason is not None
+
+
+@respx.mock
+async def test_retry_ladder_is_bounded_by_a_wall_clock_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A throttled call must return before an MCP client's read timeout.
+
+    Attempt counts alone do not bound latency: pacing plus exponential
+    backoff let one call run for minutes. A measured on-device run died that
+    way — the client timed out and dropped the connection instead of
+    receiving the typed rate-limit error the ladder was about to raise.
+    """
+    monkeypatch.setattr(ss, "_MAX_ATTEMPTS", 50)
+    monkeypatch.setattr(ss, "_RETRY_BASE_S", 30.0)
+    monkeypatch.setattr(ss, "_DEADLINE_S", 5.0)
+
+    slept: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(ss, "_sleep", _record)
+    respx.get(_SEARCH_URL).mock(return_value=httpx.Response(429))
+
+    with pytest.raises(RateLimitedError):
+        await search_papers("transformer")
+
+    # It must give up rather than sleep a 30s backoff against a 5s budget.
+    assert sum(slept) <= 5.0, f"slept {sum(slept)}s against a 5s deadline"
+
+
+@respx.mock
+async def test_pacing_is_inside_the_budget_not_just_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Total call time must be bounded, pacing included.
+
+    Bounding only the backoff sleep was not enough: with several attempts the
+    per-attempt pacing dominated, a call ran ~60s on device, and the MCP
+    dispatcher timed the request out. The caller then saw a dead connection
+    instead of a typed rate-limit error.
+
+    Uses a virtual clock, because a no-op sleep advances no real time and the
+    deadline would never trip.
+    """
+
+    class _Clock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    clock = _Clock()
+    slept: list[float] = []
+
+    async def _advance(seconds: float) -> None:
+        clock.now += seconds
+        slept.append(seconds)
+
+    monkeypatch.setattr(ss, "time", clock)
+    monkeypatch.setattr(ss, "_sleep", _advance)
+    monkeypatch.setattr(ss, "_MAX_ATTEMPTS", 10)
+    monkeypatch.setattr(ss, "_MIN_INTERVAL_S", 6.0)
+    monkeypatch.setattr(ss, "_RETRY_BASE_S", 1.0)
+    monkeypatch.setattr(ss, "_DEADLINE_S", 20.0)
+    monkeypatch.setattr(ss, "_last_request_ts", 0.0)
+    respx.get(_SEARCH_URL).mock(return_value=httpx.Response(429))
+
+    with pytest.raises(RateLimitedError):
+        await search_papers("transformer")
+
+    # Ten attempts at 6s pacing would be 60s+; the budget must stop it early.
+    assert clock.now <= 26.0, f"call ran {clock.now}s against a 20s budget"

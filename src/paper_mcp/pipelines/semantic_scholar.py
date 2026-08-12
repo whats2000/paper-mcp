@@ -63,6 +63,16 @@ _TIMEOUT = httpx.Timeout(10.0)
 _MIN_INTERVAL_S = float(os.environ.get("PAPER_MCP_S2_MIN_INTERVAL_S", "1.1"))
 _MAX_ATTEMPTS = int(os.environ.get("PAPER_MCP_S2_MAX_ATTEMPTS", "4"))
 _RETRY_BASE_S = float(os.environ.get("PAPER_MCP_S2_RETRY_BASE_S", "1.0"))
+# Hard ceiling on the total time one call may spend pacing and retrying.
+#
+# Attempt counts alone are not a bound: pacing plus exponential backoff let a
+# single call run for minutes, and an MCP client will time out its read and
+# drop the connection long before that. A measured on-device run died exactly
+# this way — the caller saw a dead socket instead of the typed `rate_limited`
+# error the retry ladder was about to produce. Returning a typed throttle with
+# `retry_after` inside the caller's patience is strictly more useful than
+# holding a connection open hoping the upstream relents.
+_DEADLINE_S = float(os.environ.get("PAPER_MCP_S2_DEADLINE_S", "25.0"))
 
 _pace_lock = asyncio.Lock()
 _last_request_ts = 0.0
@@ -132,11 +142,22 @@ async def _get_with_retry(url: str, params: dict[str, str]) -> httpx.Response:
     """
     global _last_request_ts
     resp: httpx.Response | None = None
+    deadline = time.monotonic() + _DEADLINE_S
     for attempt in range(1, _MAX_ATTEMPTS + 1):
+        # Budget check before pacing, not only before backoff. Pacing is a
+        # sleep too, and with several attempts it dominates: bounding backoff
+        # alone still let a call run ~60s and trip the MCP request timeout.
+        # Always allow the first attempt — a call that never reaches the
+        # upstream has no answer to give.
+        if resp is not None and time.monotonic() >= deadline:
+            return resp
         async with _pace_lock:
             wait = _MIN_INTERVAL_S - (time.monotonic() - _last_request_ts)
             if wait > 0:
-                await _sleep(wait)
+                # Never pace past the budget. A slightly hot request is a
+                # better outcome than a connection the caller has abandoned.
+                remaining = max(deadline - time.monotonic(), 0.0)
+                await _sleep(wait if resp is None else min(wait, remaining))
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 resp = await client.get(url, params=params, headers=_headers())
             _last_request_ts = time.monotonic()
@@ -160,7 +181,17 @@ async def _get_with_retry(url: str, params: dict[str, str]) -> httpx.Response:
             retry_after if retry_after is not None else _RETRY_BASE_S * (2 ** (attempt - 1))
         )
         # Jitter spreads concurrent retriers apart; not a security context.
-        await _sleep(backoff + random.uniform(0, 0.3))
+        backoff += random.uniform(0, 0.3)
+        if time.monotonic() + backoff > deadline:
+            # Sleeping would push this call past the budget. Hand the 429 back
+            # now so the caller gets a typed error with `retry_after` while it
+            # is still listening.
+            _LOG.warning(
+                "s2 giving up after %.1fs (deadline %.0fs): %s",
+                _DEADLINE_S - (deadline - time.monotonic()), _DEADLINE_S, url,
+            )
+            return resp
+        await _sleep(backoff)
     assert resp is not None  # loop runs >=1 time
     return resp
 

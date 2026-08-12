@@ -15,11 +15,41 @@ from typing import Any
 import arxiv
 from pydantic import BaseModel
 
-from paper_mcp.models import OpenAccess, PaperRef, clamp_max_results, normalize_paper_id
+from paper_mcp.models import (
+    MAX_RESULTS_CEILING,
+    OpenAccess,
+    PaperRef,
+    RateLimitedError,
+    UpstreamError,
+    clamp_max_results,
+    normalize_paper_id,
+)
 
 logger = logging.getLogger(__name__)
 
-_client = arxiv.Client()
+# `page_size` matches our own result ceiling: the library otherwise asks arXiv
+# for 100 results per page even when the caller wanted 3, which is wasted load
+# on an API that rate-limits by request. `delay_seconds`/`num_retries` are the
+# library's own pacing, made explicit rather than left to defaults.
+_client = arxiv.Client(page_size=MAX_RESULTS_CEILING, delay_seconds=3.0, num_retries=3)
+
+
+def _translate(exc: arxiv.HTTPError) -> Exception:
+    """Map an arXiv transport error onto this project's error taxonomy.
+
+    Without this, an arXiv 429 reaches the caller as a raw library exception
+    and renders as an opaque tool failure — while the equivalent Semantic
+    Scholar throttle returns a typed `rate_limited` carrying `retry_after`.
+    An on-device run hit exactly that inconsistency. Repeated identical
+    queries getting throttled is ordinary upstream behaviour, so it deserves
+    an ordinary, actionable error rather than a stack trace.
+    """
+    if exc.status == 429:
+        return RateLimitedError(
+            "arXiv rate-limited this query; retry shortly or narrow the search",
+            retry_after=None,
+        )
+    return UpstreamError(f"arXiv returned HTTP {exc.status} for {exc.url}")
 
 _ARXIV_ID_RE = re.compile(r"(\d{4}\.\d{4,5})(v\d+)?")
 
@@ -63,7 +93,10 @@ def search_arxiv(query: str, max_results: int = 8) -> list[ArxivResult]:
         max_results=clamp_max_results(max_results),
         sort_by=arxiv.SortCriterion.Relevance,
     )
-    return [_to_result(r) for r in _client.results(search)]
+    try:
+        return [_to_result(r) for r in _client.results(search)]
+    except arxiv.HTTPError as exc:
+        raise _translate(exc) from exc
 
 
 def fetch_arxiv_by_id(arxiv_id: str) -> ArxivResult | None:
@@ -71,12 +104,20 @@ def fetch_arxiv_by_id(arxiv_id: str) -> ArxivResult | None:
 
     Unlike `search_arxiv` (a relevance query that returns the nearest match
     for ANY string), this uses arXiv's `id_list`, so a bogus id returns None
-    rather than a confidently-wrong neighbour. Best-effort: any API error is
-    logged and treated as "unverifiable".
+    rather than a confidently-wrong neighbour.
+
+    A *transport* failure is re-raised rather than swallowed. arXiv signals an
+    unknown id with an empty feed, not an HTTP error, so an HTTPError here
+    means "we could not ask" — not "the paper does not exist". Collapsing the
+    two would turn a transient 429 on a perfectly valid id into a confident
+    "no paper matched", sending the caller down the title-search fallback for
+    no reason. Other unexpected errors stay best-effort.
     """
     try:
         for r in _client.results(arxiv.Search(id_list=[arxiv_id])):
             return _to_result(r)
+    except arxiv.HTTPError as exc:
+        raise _translate(exc) from exc
     except Exception as exc:  # best-effort verification: any failure is "unknown"
         logger.warning(
             "fetch_arxiv_by_id(%r) failed (%s: %s); treating as unverifiable",

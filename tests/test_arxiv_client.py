@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import arxiv
 import pytest
 
+from paper_mcp.models import MAX_RESULTS_CEILING, RateLimitedError, UpstreamError
 from paper_mcp.pipelines import arxiv_client
 from paper_mcp.pipelines.arxiv_client import (
     ArxivResult,
@@ -76,6 +78,55 @@ def test_fetch_by_id_returns_none_when_upstream_raises(
     # Best-effort verification: an unreachable arXiv means "unverifiable",
     # not a failed tool call.
     assert fetch_arxiv_by_id("1706.03762") is None
+
+
+def _throttling_client() -> Any:
+    class _Throttled:
+        def results(self, search: Any) -> list[_FakeEntry]:
+            raise arxiv.HTTPError(url="https://export.arxiv.org/api/query", retry=3, status=429)
+
+    return _Throttled()
+
+
+def test_search_maps_a_429_to_a_typed_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Repeated identical queries getting throttled is ordinary upstream
+    # behaviour and must surface as an actionable error, the same way a
+    # Semantic Scholar throttle does — not as a raw library exception.
+    monkeypatch.setattr(arxiv_client, "_client", _throttling_client())
+
+    with pytest.raises(RateLimitedError):
+        search_arxiv("sparse attention")
+
+
+def test_search_maps_other_http_errors_to_upstream_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Broken:
+        def results(self, search: Any) -> list[_FakeEntry]:
+            raise arxiv.HTTPError(url="https://export.arxiv.org/api/query", retry=1, status=503)
+
+    monkeypatch.setattr(arxiv_client, "_client", _Broken())
+
+    with pytest.raises(UpstreamError):
+        search_arxiv("anything")
+
+
+def test_fetch_by_id_does_not_disguise_a_throttle_as_a_missing_paper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # arXiv signals an unknown id with an empty feed, not an HTTP error. So a
+    # 429 here means "we could not ask", and returning None would tell the
+    # caller a valid paper does not exist.
+    monkeypatch.setattr(arxiv_client, "_client", _throttling_client())
+
+    with pytest.raises(RateLimitedError):
+        fetch_arxiv_by_id("1706.03762")
+
+
+def test_page_size_matches_our_own_result_ceiling() -> None:
+    # The library otherwise requests 100 results per page even when the
+    # caller asked for 3 — wasted load on a rate-limited API.
+    assert arxiv_client._client.page_size == MAX_RESULTS_CEILING
 
 
 def test_fetch_by_id_returns_the_paper(monkeypatch: pytest.MonkeyPatch) -> None:

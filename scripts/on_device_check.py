@@ -91,8 +91,12 @@ def boot(port: int) -> subprocess.Popen[str]:
         "PAPER_MCP_S2_MIN_INTERVAL_S": os.environ.get(
             "PAPER_MCP_S2_MIN_INTERVAL_S", "6.0"
         ),
-        "PAPER_MCP_S2_MAX_ATTEMPTS": os.environ.get("PAPER_MCP_S2_MAX_ATTEMPTS", "6"),
+        "PAPER_MCP_S2_MAX_ATTEMPTS": os.environ.get("PAPER_MCP_S2_MAX_ATTEMPTS", "3"),
         "PAPER_MCP_S2_RETRY_BASE_S": os.environ.get("PAPER_MCP_S2_RETRY_BASE_S", "4.0"),
+        # Keep the total upstream budget comfortably inside the MCP client's
+        # request timeout. Attempts x pacing must not be allowed to outlive
+        # the caller — a typed rate-limit beats a dropped connection.
+        "PAPER_MCP_S2_DEADLINE_S": os.environ.get("PAPER_MCP_S2_DEADLINE_S", "30.0"),
     }
     return subprocess.Popen(
         [sys.executable, "-c", "from paper_mcp.server import main; main()"],
@@ -150,7 +154,12 @@ def rate_limited(result: Any) -> bool:
     went wrong and we would rather not look".
     """
     text = error_text(result).lower()
-    return "rate-limited" in text or "too many requests" in text
+    return (
+        "rate-limited" in text
+        or "too many requests" in text
+        # arXiv's own phrasing, via the arxiv library.
+        or "http 429" in text
+    )
 
 
 async def check(
@@ -161,19 +170,29 @@ async def check(
     *,
     detail: Any = None,
 ) -> None:
-    """Run one live check, classifying only a genuine upstream throttle as SKIP."""
+    """Run one live check, classifying only a genuine upstream throttle as SKIP.
+
+    Every outcome carries its elapsed time. Without it a failure cannot be
+    attributed: a tool that returns a typed budget error at its deadline and
+    one that stalls until the client gives up look identical in the report,
+    and the difference is the whole diagnosis.
+    """
+    started = time.monotonic()
     try:
         result = await coro
     except Exception as exc:
-        rep.record("FAIL", name, f"{type(exc).__name__}: {exc}")
+        rep.record(
+            "FAIL", name, f"[{time.monotonic() - started:.1f}s] {type(exc).__name__}: {exc}"
+        )
         return
+    took = f"[{time.monotonic() - started:.1f}s] "
     if getattr(result, "is_error", False):
         if rate_limited(result):
-            rep.record("SKIP", name, "upstream rate-limited (no API key)")
+            rep.record("SKIP", name, f"{took}upstream rate-limited (no API key)")
         else:
             # Never run `verify` against an error result: it would fail with
             # a confusing type error instead of showing what actually broke.
-            rep.record("FAIL", name, error_text(result)[:220])
+            rep.record("FAIL", name, took + error_text(result)[:200])
         return
     try:
         ok = verify(result)
@@ -181,10 +200,10 @@ async def check(
         rep.record("FAIL", name, f"verify raised {type(exc).__name__}: {exc}")
         return
     if ok:
-        rep.record("PASS", name, detail(result) if detail else "")
+        rep.record("PASS", name, took + (detail(result) if detail else ""))
     else:
         payload = value(result)
-        rep.record("FAIL", name, f"unexpected: {str(payload)[:200]}")
+        rep.record("FAIL", name, f"{took}unexpected: {str(payload)[:190]}")
 
 
 async def run_checks(base: str, health: dict[str, Any], rep: Report) -> None:
@@ -247,7 +266,15 @@ async def run_checks(base: str, health: dict[str, Any], rep: Report) -> None:
         )
 
     # --- tools, live -------------------------------------------------------
-    async with Client(url) as client:
+    #
+    # An explicit read timeout, generous enough to outlast a throttled
+    # upstream. A previous run died here: a tool call sat in the service's own
+    # retry ladder until the client's default read timeout fired, and the
+    # resulting transport error propagated out of the client's teardown and
+    # aborted the whole matrix with 8 checks still unrun. The service now
+    # bounds its retry budget too (PAPER_MCP_S2_DEADLINE_S), so this is the
+    # second line of defence rather than the first.
+    async with Client(url, read_timeout_seconds=120.0) as client:
         await check(
             rep,
             "search_arxiv: relevance query",
@@ -388,6 +415,26 @@ async def run_checks(base: str, health: dict[str, Any], rep: Report) -> None:
                 "errors: unmatchable title yields not_found, not a wrong paper",
                 text[:110] if gibberish.is_error else f"matched {value(gibberish)}",
             )
+
+        # --- resilience ------------------------------------------------------
+        #
+        # The check that survives a throttled upstream, and therefore the most
+        # valuable one here: whatever the upstream does, a tool call must come
+        # back promptly with a typed answer. Holding the connection open past
+        # the client's patience turns a recoverable rate-limit into a dropped
+        # request, which is exactly how an earlier run died.
+        started = time.monotonic()
+        throttled = await client.call_tool(
+            "search_papers", {"query": "graph neural networks survey", "max_results": 2}
+        )
+        elapsed = time.monotonic() - started
+        answered = (not throttled.is_error) or rate_limited(throttled)
+        rep.record(
+            "PASS" if (answered and elapsed < 60) else "FAIL",
+            "resilience: a throttled upstream degrades to a typed error, not a hang",
+            f"{elapsed:.1f}s, "
+            + ("results" if not throttled.is_error else f"typed: {error_text(throttled)[:70]}"),
+        )
 
         # --- concurrency ---------------------------------------------------
         started = time.monotonic()

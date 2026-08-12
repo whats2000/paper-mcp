@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from paper_mcp.models import NotFoundError
@@ -223,3 +225,77 @@ async def test_resolve_paper_explains_when_unpaywall_is_unconfigured(
 
     assert ref.open_access.available is False
     assert "PAPER_MCP_UNPAYWALL_EMAIL" in (ref.open_access.reason or "")
+
+
+async def test_a_slow_upstream_yields_a_typed_error_within_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No tool call may outlive the MCP client's request timeout.
+
+    Both upstreams retry internally with no bound, and on device that made
+    tool calls run long enough for the client to drop the request. A dropped
+    request is worse than a typed error: the caller cannot act on it.
+    """
+    from paper_mcp.models import UpstreamError
+
+    monkeypatch.setattr(discovery, "_TOOL_BUDGET_S", 0.2)
+
+    async def _never_returns(query: str, max_results: int = 8) -> list[S2Hit]:
+        await asyncio.sleep(30)
+        return []
+
+    monkeypatch.setattr(discovery, "search_papers", _never_returns)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(UpstreamError, match="budget"):
+        await discovery.tool_search_papers("anything")
+    assert asyncio.get_running_loop().time() - started < 5.0
+
+
+async def test_resolve_paper_budgets_the_whole_chain_not_each_hop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from paper_mcp.models import UpstreamError
+
+    monkeypatch.setattr(discovery, "_TOOL_BUDGET_S", 0.2)
+
+    async def _never_returns(query: str, max_results: int = 8) -> list[S2Hit]:
+        await asyncio.sleep(30)
+        return []
+
+    monkeypatch.setattr(discovery, "search_papers", _never_returns)
+
+    with pytest.raises(UpstreamError, match="budget"):
+        await discovery.tool_resolve_paper("some paper title")
+
+
+async def test_budget_returns_on_time_even_when_the_thread_cannot_be_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The budget must be a wall-clock guarantee, not a polite request.
+
+    `asyncio.wait_for` cancels the inner task and then awaits the
+    cancellation. A `to_thread` call cannot be cancelled, so it kept the
+    budget waiting far past its deadline — on device the call outlived the
+    MCP client even with the budget in place. This test blocks in a real
+    thread, so it fails under `wait_for` and passes under `asyncio.wait`.
+    """
+    import time as _time
+
+    from paper_mcp.models import UpstreamError
+
+    monkeypatch.setattr(discovery, "_TOOL_BUDGET_S", 0.3)
+
+    def _uncancellable(query: str, max_results: int = 8) -> list[ArxivResult]:
+        _time.sleep(3.0)
+        return []
+
+    monkeypatch.setattr(discovery, "search_arxiv", _uncancellable)
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(UpstreamError, match="budget"):
+        await discovery.tool_search_arxiv("anything")
+    elapsed = loop.time() - started
+
+    assert elapsed < 1.5, f"returned after {elapsed:.1f}s, budget was 0.3s"
