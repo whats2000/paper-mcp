@@ -23,9 +23,11 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -70,7 +72,7 @@ def free_port() -> int:
     return port
 
 
-def boot(port: int) -> subprocess.Popen[str]:
+def boot(port: int) -> tuple[subprocess.Popen[str], Path]:
     """Start the service through its real console entry point."""
     env = {
         **os.environ,
@@ -98,20 +100,36 @@ def boot(port: int) -> subprocess.Popen[str]:
         # the caller — a typed rate-limit beats a dropped connection.
         "PAPER_MCP_S2_DEADLINE_S": os.environ.get("PAPER_MCP_S2_DEADLINE_S", "30.0"),
     }
-    return subprocess.Popen(
+    # Server output goes to a FILE, never to an undrained PIPE.
+    #
+    # This is not a style preference. With stdout=PIPE and nobody reading it,
+    # the OS pipe buffer fills and the server blocks inside write() — the
+    # event loop stops, timers stop firing, and every later request hangs
+    # until the client gives up. Measured here: the server froze permanently
+    # at request 61 (~4KB of logs) with a pipe, and survived 3000 requests
+    # against a file. It cost a full debugging cycle, because the symptom
+    # looked exactly like a service defect: checks passing early and timing
+    # out later, with a tool budget that appeared not to fire.
+    log_path = Path(tempfile.gettempdir()) / f"paper-mcp-on-device-{port}.log"
+    handle = log_path.open("w", encoding="utf-8")
+    proc = subprocess.Popen(
         [sys.executable, "-c", "from paper_mcp.server import main; main()"],
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=handle,
         stderr=subprocess.STDOUT,
         text=True,
     )
+    return proc, log_path
 
 
-def wait_healthy(base: str, proc: subprocess.Popen[str], timeout: float = 45.0) -> dict[str, Any]:
+def wait_healthy(
+    base: str, proc: subprocess.Popen[str], log_path: Path, timeout: float = 45.0
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(f"server exited early:\n{proc.communicate()[0]}")
+            tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+            raise RuntimeError(f"server exited early:\n{tail}")
         try:
             resp = httpx.get(f"{base}/health", timeout=2.0)
             if resp.status_code == 200:
@@ -453,12 +471,12 @@ async def run_checks(base: str, health: dict[str, Any], rep: Report) -> None:
 
 async def main() -> int:
     port = free_port()
-    proc = boot(port)
+    proc, log_path = boot(port)
     base = f"http://127.0.0.1:{port}"
     rep = Report()
     print(f"paper-mcp on-device check -> {base}\n{'=' * 72}", flush=True)
     try:
-        health = wait_healthy(base, proc)
+        health = wait_healthy(base, proc, log_path)
         await run_checks(base, health, rep)
     except Exception:
         traceback.print_exc()
@@ -470,6 +488,15 @@ async def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
     print(rep.summary())
+    if rep.failures:
+        # The server's own view of a failing run. Previously this went into an
+        # undrained pipe, where it was both invisible and actively harmful.
+        tail = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+        if tail:
+            print("\nserver log (last 25 lines):")
+            for line in tail[-25:]:
+                print(f"  {line}")
+        print(f"\nfull server log: {log_path}")
     return 1 if rep.failures else 0
 
 
