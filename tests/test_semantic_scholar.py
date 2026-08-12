@@ -191,6 +191,24 @@ async def test_a_404_is_not_found_not_an_upstream_fault() -> None:
 
 
 @respx.mock
+async def test_a_404_carries_the_upstream_body() -> None:
+    # A 404 body distinguishes "no such paper" from "no such route" — the
+    # message "Paper with id <id>/related not found" is what revealed that a
+    # whole endpoint did not exist. An earlier version dropped it, which is
+    # precisely the diagnostic that had to be recovered by hand.
+    respx.get(
+        "https://api.semanticscholar.org/graph/v1/paper/DOI:10.1/x"
+    ).mock(
+        return_value=httpx.Response(
+            404, json={"error": "Paper with id DOI:10.1/x/related not found"}
+        )
+    )
+
+    with pytest.raises(NotFoundError, match=re.escape("/related not found")):
+        await fetch_paper_metadata("doi:10.1/x")
+
+
+@respx.mock
 async def test_citation_results_without_the_nested_paper_are_skipped() -> None:
     respx.get(
         "https://api.semanticscholar.org/graph/v1/paper/arXiv:1706.03762/citations"

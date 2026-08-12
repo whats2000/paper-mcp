@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import time
@@ -35,10 +36,23 @@ from paper_mcp.models import (
     s2_path_id,
 )
 
+_LOG = logging.getLogger(__name__)
+
 API_BASE = "https://api.semanticscholar.org/graph/v1"
 # "Similar papers" is a DIFFERENT service, not a graph endpoint.
-# `graph/v1/paper/{id}/related` does not exist and 404s with the misleading
-# "Paper with id <id>/related not found" — it reads the whole thing as an id.
+#
+# `graph/v1/paper/{id}/related` does not exist. Establishing that took a
+# controlled experiment, because the 404 body blames the paper, not the route:
+#
+#   /paper/arXiv:1706.03762/citations     -> 200            (real sub-route)
+#   /paper/arXiv:1706.03762/related       -> 404 "Paper with id …/related not found"
+#   /paper/<s2-hex-id>/related            -> 404 (so it is not about the id form)
+#   /paper/arXiv:1706.03762/zzznotaroute  -> 404 "Paper with id …/zzznotaroute not found"
+#
+# An invented segment yields the identical error shape as `/related`, which
+# means unmatched trailing segments are absorbed into the {paper_id} path
+# parameter. The API is reporting a missing *paper* whose id happens to end in
+# "/related" — it never had a related-papers route at all.
 RECOMMENDATIONS_BASE = "https://api.semanticscholar.org/recommendations/v1"
 # The recommendations endpoint returns an EMPTY list unless `from` is given.
 # `all-cs` searches the full corpus; the default (`recent`) yields nothing for
@@ -126,6 +140,19 @@ async def _get_with_retry(url: str, params: dict[str, str]) -> httpx.Response:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 resp = await client.get(url, params=params, headers=_headers())
             _last_request_ts = time.monotonic()
+        # Record the URL as httpx actually built it, not as we composed it —
+        # path escaping is exactly the kind of difference that turns a
+        # working request into a 404, and guessing at it costs a debugging
+        # session. Bodies are logged only for failures, and only a head.
+        if resp.status_code >= 400:
+            _LOG.warning(
+                "s2 request failed: GET %s -> %d %s",
+                resp.request.url,
+                resp.status_code,
+                resp.text[:_ERROR_BODY_CHARS],
+            )
+        else:
+            _LOG.debug("s2 request: GET %s -> %d", resp.request.url, resp.status_code)
         if resp.status_code != 429 or attempt == _MAX_ATTEMPTS:
             return resp
         retry_after = _parse_retry_after(resp.headers.get("retry-after"))
@@ -154,7 +181,17 @@ def _raise_for_status(resp: httpx.Response, *, what: str) -> None:
     if resp.status_code == 404:
         # Semantic Scholar simply not having a paper is an ordinary answer,
         # not an upstream fault — the caller can still fall back to a search.
-        raise NotFoundError(f"Semantic Scholar has no record for {what}")
+        #
+        # The body is carried here for the same reason as below, and the
+        # omission was not hypothetical: an earlier version of this branch
+        # dropped it, and the discarded string ("Paper with id
+        # <id>/related not found") was the single piece of evidence that
+        # identified a wrong endpoint. A 404 without the upstream's own
+        # words cannot distinguish "no such paper" from "no such route".
+        raise NotFoundError(
+            f"Semantic Scholar has no record for {what}: "
+            f"{resp.text[:_ERROR_BODY_CHARS]}",
+        )
     if resp.status_code >= 400:
         raise UpstreamError(
             f"Semantic Scholar returned HTTP {resp.status_code} for {what}: "
