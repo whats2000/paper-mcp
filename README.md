@@ -1,11 +1,57 @@
 # paper-mcp
 
-A stateless MCP service that turns papers into agent-ready data and compiles LaTeX.
+**Ready-to-use tools that give an LLM agent a paper it can actually work with:
+the full text as markdown, and an index of every figure with its caption.**
 
 Built for external agent clients (Claude Cowork, Claude Desktop, Cursor, any MCP
-framework). It supplies what those clients lack — paper acquisition, faithful
-extraction, and a working LaTeX toolchain — and nothing else: **no accounts, no
-stored user data, no server-side LLM calls.**
+framework). It supplies what those clients lack — paper acquisition and faithful
+extraction — and nothing else: **no accounts, no stored user data, no
+server-side LLM calls, and no agent flows.**
+
+This is *data-processing functionality*, not an agent. Pipelines built on top —
+slides, summaries, literature reviews — belong to the calling agent and its own
+skills. This service's only job is to make each step precise.
+
+## What you get
+
+```jsonc
+fetch_paper("arxiv:1706.03762") →
+{
+  "markdown": "## Introduction
+
+The dominant sequence transduction models…
+
+
+               | Model | BLEU |
+| --- | --- |
+| Base | 27.3 |
+
+
+               $$
+\mathrm{Attention}(Q,K,V)=…
+$$",
+  "figures": [
+    { "id": "fig-001", "caption": "The Transformer architecture.",
+      "page": 3, "image_url": "https://…/a/<token>/figures/fig-001.png" }
+  ]
+}
+```
+
+Extraction is **Marker**, and only Marker. Three guarantees, each asserted by
+tests and by a real-workflow check:
+
+- **Tables stay tables** — rows and columns intact. A table flattened to a blob
+  of cell text invites an agent to read numbers against the wrong column.
+- **Equations stay LaTeX** — never prose approximations of maths.
+- **Figures are extracted, indexed and captioned** — an index entry exists only
+  when the image really decoded to disk, so citing `fig-001` always refers to
+  something real.
+
+There is no low-fidelity fallback engine. PaperHub shipped crude PyMuPDF
+extraction once, measured the output as "conference-UNusable", and replaced it
+with Marker; a service whose value is faithful extraction must not quietly
+substitute unfaithful extraction. Without Marker, a PDF fetch reports
+`extraction_unavailable` rather than degrading.
 
 That last part is the security architecture, not an omission. With no per-user
 state, a shared public endpoint has nothing to leak between callers, and
@@ -18,10 +64,10 @@ identity degrades to a quota key.
 | Tool | Phase | Status |
 | --- | --- | --- |
 | `search_arxiv` · `search_papers` · `find_related` · `resolve_paper` | A | ✅ shipped |
-| `fetch_paper` · `get_section` · `get_job` | B | planned |
-| `compile_latex` (sandboxed) | C | planned |
+| `fetch_paper` · `get_job` + artifact serving | B | ✅ built, pending real-Marker verification |
+| `compile_latex` (sandboxed, a tool — not a flow) | C | planned |
 | OIDC auth + quota | D | planned |
-| Portable skills + container | E | planned |
+| Portable skills (examples, not the product) | E | planned |
 
 ## Development
 
@@ -31,8 +77,22 @@ uv run pytest                    # fast, offline (integration excluded)
 uv run pytest -m integration     # spawns a real server, drives it with a real MCP client
 uv run ruff check src tests
 uv run mypy src
+
+docker compose up -d marker      # required for extraction
 uv run paper-mcp
 ```
+
+### The check that decides whether this works
+
+```bash
+uv run python scripts/paper_workflow_check.py 1706.03762
+```
+
+Drives the real workflow over MCP against the real Marker service and judges
+the *content*: does the markdown have tables with separator rows, equations as
+LaTeX, a populated and captioned figure index, and figure URLs that download
+real image bytes? A green pytest says the code runs; this says an agent can use
+the output. Slow by nature — Marker takes roughly a minute per dense page.
 
 The interpreter is pinned in `.python-version` (3.13) so every contributor and
 the container build agree on one runtime (NFR-07).
