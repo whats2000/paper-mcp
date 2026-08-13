@@ -82,6 +82,35 @@ def test_resolve_rejects_an_unknown_token(tmp_path: Path) -> None:
         store.resolve("not-a-real-token", "bundle.json")
 
 
+def test_resolve_refuses_a_token_that_is_not_a_sha256_digest(tmp_path: Path) -> None:
+    # A directory really exists under this name, and it is still refused: a
+    # token is a sha256 hexdigest or it is nothing. `str.isalnum()` would have
+    # accepted this, and unicode digits besides.
+    store = ArtifactStore(tmp_path)
+    token = "Z" * 64
+    entry = tmp_path / token[:2] / token
+    entry.mkdir(parents=True)
+    (entry / "bundle.json").write_text("{}")
+
+    with pytest.raises(InvalidArgumentError):
+        store.resolve(token, "bundle.json")
+
+
+def test_resolve_returns_a_file_the_entry_really_holds(tmp_path: Path) -> None:
+    # The returned path is built from the filesystem, never by joining the
+    # caller's string onto a directory — so a spelling that normalizes onto a
+    # real file is still refused unless it matches what the entry publishes.
+    store = ArtifactStore(tmp_path)
+    entry = store.dir_for("arxiv:1")
+    entry.mkdir(parents=True)
+    (entry / "bundle.json").write_text("{}")
+
+    assert store.resolve(token_for("arxiv:1"), "bundle.json").is_file()
+    for spelling in ("./bundle.json", "figures/../bundle.json", "/bundle.json"):
+        with pytest.raises(InvalidArgumentError):
+            store.resolve(token_for("arxiv:1"), spelling)
+
+
 def test_resolve_refuses_a_symlink_escaping_the_entry(tmp_path: Path) -> None:
     # The traversal check must happen AFTER resolution, or a symlink walks
     # straight through it.

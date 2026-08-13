@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -28,6 +29,11 @@ from paper_mcp.config import settings
 from paper_mcp.models import InvalidArgumentError
 
 _LOG = logging.getLogger(__name__)
+
+# A token is a sha256 hexdigest or it is nothing. `str.isalnum()` was too
+# generous: it accepts unicode digits and letters, none of which this service
+# ever mints.
+_TOKEN_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def content_key(*, arxiv_id: str | None = None, data: bytes | None = None) -> str:
@@ -78,33 +84,36 @@ class ArtifactStore:
     def resolve(self, token: str, rel: str) -> Path:
         """Map a public `(token, rel)` pair onto a real file inside the store.
 
-        `rel` arrives from the network on a public endpoint, so this is a
-        security boundary rather than input tidying. The containment check runs
-        *after* `.resolve()`: checking the raw string alone would let a symlink
-        inside the entry point anywhere on the host.
-        """
-        if not rel or rel.strip() in {"", "."}:
-            raise InvalidArgumentError("artifact path is empty")
-        if not token or not token.isalnum() or len(token) != 64:
-            raise InvalidArgumentError("unknown or expired artifact token")
-        # Reject Windows-style traversal explicitly — on POSIX, `Path` treats
-        # "..\\.." as one innocent-looking filename.
-        if "\\" in rel:
-            raise InvalidArgumentError(f"illegal artifact path: {rel!r}")
-        candidate_rel = Path(rel)
-        if candidate_rel.is_absolute() or any(part == ".." for part in candidate_rel.parts):
-            raise InvalidArgumentError(f"illegal artifact path: {rel!r}")
+        Both halves arrive from the network on a public endpoint, so this is a
+        security boundary rather than input tidying — and it is built so that
+        traversal cannot happen rather than so that traversal is detected.
 
+        `rel` is never joined onto a directory. The entry is enumerated and
+        `rel` is matched against the paths it actually publishes, so the `Path`
+        returned was constructed by this process from the filesystem. No
+        spelling of the input — encoded, double-encoded, backslashed,
+        absolute, or `..`-laden — can name a file the entry does not hold,
+        because the input is a lookup key and never a path component.
+
+        A symlink pointing out of the entry is excluded too: the entry holds
+        only files this service wrote, so anything resolving elsewhere is not
+        part of the bundle regardless of how it got there.
+        """
+        if not _TOKEN_RE.fullmatch(token):
+            raise InvalidArgumentError("unknown or expired artifact token")
         entry = self.dir_for_token(token)
         if not entry.is_dir():
             raise InvalidArgumentError("unknown or expired artifact token")
 
-        target = (entry / candidate_rel).resolve()
-        if not target.is_relative_to(entry.resolve()):
-            raise InvalidArgumentError(f"artifact path escapes its bundle: {rel!r}")
-        if not target.exists():
-            raise InvalidArgumentError(f"no such artifact file: {rel!r}")
-        return target
+        wanted = rel.strip()
+        boundary = entry.resolve()
+        for candidate in entry.rglob("*"):
+            if candidate.relative_to(entry).as_posix() != wanted or not candidate.is_file():
+                continue
+            target = candidate.resolve()
+            if target.is_relative_to(boundary):
+                return target
+        raise InvalidArgumentError(f"no such artifact file: {rel!r}")
 
     def url_for(self, key: str, rel: str) -> str:
         base = settings().public_base_url.rstrip("/")
