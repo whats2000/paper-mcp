@@ -20,17 +20,22 @@ services:
       # batch taking 21 minutes. Raise only on a bigger GPU.
       - PAPER_MCP_MARKER_MAX_PAGES=1
       - PAPER_MCP_ARTIFACT_ROOT=/app/artifacts
+      # Ceiling on an uploaded PDF. Part of containment (SRS NFR-02), not
+      # politeness: the papers this serves are single-digit megabytes, so a
+      # generous cap costs nothing and refuses a file whose only purpose is
+      # to exhaust memory before it reaches the decoder.
+      - PAPER_MCP_MAX_UPLOAD_BYTES=${PAPER_MCP_MAX_UPLOAD_BYTES:-26214400}
       # A public deployment MUST name its own hostname here, or every request
       # is rejected with 421 by DNS-rebinding protection.
       - PAPER_MCP_ALLOWED_HOSTS=${PAPER_MCP_ALLOWED_HOSTS:-localhost:8000,127.0.0.1:8000}
       - PAPER_MCP_LOG_LEVEL=${PAPER_MCP_LOG_LEVEL:-warning}
     volumes:
       - paper-mcp-artifacts:/app/artifacts
-    # nsjail creates namespaces, which Docker's default seccomp profile
-    # blocks; without this every compile fails to launch. Measured: no
-    # SYS_ADMIN and no --privileged are needed, only the seccomp exemption.
-    security_opt:
-      - seccomp=unconfined
+    # No `seccomp=unconfined` here any more. It existed because nsjail creates
+    # namespaces, which Docker's default profile blocks — and nsjail existed
+    # because this service compiled caller-supplied LaTeX. With compilation
+    # out of scope (SRS v1.0) nothing here executes untrusted input, so the
+    # default seccomp profile applies again.
     depends_on:
       - marker
     restart: unless-stopped
@@ -71,6 +76,38 @@ services:
       # ~2 GB of Surya weights download once and persist across image
       # rebuilds; without this every rebuild re-downloads them.
       - marker-models:/models
+    # ── containment (SRS NFR-02) ─────────────────────────────────────────
+    # Marker is the sandbox boundary, in the way nsjail was for LaTeX. It is
+    # the only component that touches untrusted input: `marker-pdf` pins
+    # `pillow<11` at every released version while current image-decode
+    # advisories are fixed in 12.3.0, and upgrading is not available — so the
+    # control is not whether an exploit triggers, but what it reaches.
+    #
+    # Pre-validation cannot substitute. The advisories are decode bugs
+    # reachable through images that are otherwise perfectly legitimate, and
+    # decoding documents is what this service is for.
+    #
+    # Egress is deliberately NOT cut here, and that is a trade-off rather than
+    # an oversight. Cutting it (a `networks: [internal]` with
+    # `internal: true`) is the strongest control available in compose — but it
+    # also disables Marker's `use_llm` accuracy pass, which calls Google's
+    # API and is what keeps table structure honest. Compose cannot allowlist a
+    # single host; that needs a proxy or host firewall.
+    #
+    # So: keyless deployments SHOULD cut egress once the weights are cached
+    # (they download on first extraction). Deployments using GEMINI_API_KEY
+    # keep egress and rely on the controls below. Choose deliberately.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      # Marker writes scratch files per extraction; a read-only root needs
+      # somewhere for them, sized so a decompression bomb fills a tmpfs
+      # rather than the host disk.
+      - /tmp:size=2g
+    mem_limit: 8g
+    pids_limit: 512
     restart: unless-stopped
     # GPU passthrough. Requires the NVIDIA container toolkit on the host;
     # Marker falls back to CPU automatically if unavailable, which is far too
