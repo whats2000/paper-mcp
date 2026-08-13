@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from paper_mcp.bundle import (
     Bundle,
+    DocumentRef,
     FigureRef,
     cap_markdown,
 )
-from paper_mcp.models import PaperRef
 
 
 def _bundle(**overrides: object) -> Bundle:
     base: dict[str, object] = {
-        "bundle_id": "arxiv:1706.03762",
-        "paper": PaperRef(
-            paper_id="arxiv:1706.03762", title="Attention Is All You Need", source="arxiv"
+        "bundle_id": "sha256:abc123",
+        "document": DocumentRef(
+            content_sha256="abc123", bytes=2048, pages=15, title="Attention Is All You Need"
         ),
         "markdown": "## Introduction\n\nbody text",
     }

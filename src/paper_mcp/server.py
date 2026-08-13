@@ -27,14 +27,7 @@ from paper_mcp.api.artifacts import router as artifacts_router
 from paper_mcp.api.middleware import AuthQuotaMiddleware
 from paper_mcp.config import Settings, settings
 from paper_mcp.skills import load_skills
-from paper_mcp.tools.compile import tool_compile_latex
-from paper_mcp.tools.discovery import (
-    tool_find_related,
-    tool_resolve_paper,
-    tool_search_arxiv,
-    tool_search_papers,
-)
-from paper_mcp.tools.fetch import marker_client, tool_fetch_paper, tool_get_job
+from paper_mcp.tools.extract import marker_client, tool_extract_pdf, tool_get_job
 
 _LOG = logging.getLogger(__name__)
 
@@ -43,7 +36,7 @@ MCP_PATH = "/mcp"
 
 
 def build_mcp_server() -> MCPServer[Any]:
-    """Construct the MCP server with the discovery tools registered.
+    """Construct the MCP server with the extraction tools registered.
 
     Tool input schemas are derived from each handler's annotated signature,
     so the Pydantic models are the single source of truth (SRS NFR-04).
@@ -52,81 +45,29 @@ def build_mcp_server() -> MCPServer[Any]:
     server: MCPServer[Any] = MCPServer(name=SERVER_NAME, version=__version__)
 
     server.add_tool(
-        tool_search_arxiv,
-        name="search_arxiv",
+        tool_extract_pdf,
+        name="extract_pdf",
         description=(
-            "Search arXiv by relevance and return normalized paper references. "
-            "Metadata only — nothing is downloaded. Network scope: arxiv.org. "
-            "Returns at most 50 results."
-        ),
-    )
-    server.add_tool(
-        tool_search_papers,
-        name="search_papers",
-        description=(
-            "Search Semantic Scholar's full corpus (broader than arXiv; includes "
-            "citation counts and venues). Network scope: api.semanticscholar.org. "
-            "Returns at most 50 results."
-        ),
-    )
-    server.add_tool(
-        tool_find_related,
-        name="find_related",
-        description=(
-            "Walk the citation graph around a paper. mode='cites' for its "
-            "references, 'cited_by' for follow-up work, 'similar' for related "
-            "papers. paper_id must be prefixed: arxiv:<id>, ss:<paperId>, or "
-            "doi:<doi>. Network scope: api.semanticscholar.org."
-        ),
-    )
-    server.add_tool(
-        tool_fetch_paper,
-        name="fetch_paper",
-        description=(
-            "Fetch a paper as agent-ready data: the full text as markdown (real "
-            "tables, equations as LaTeX, headings intact) plus a figure index of "
-            "ids, captions and image URLs. Extraction is by Marker. Returns the "
-            "bundle immediately when cached, otherwise a job handle — a dense "
-            "paper takes roughly a minute per page. Accepts an arXiv id "
-            "(arxiv:1706.03762 or 1706.03762). Network scope: arxiv.org and the "
-            "Marker service; writes only to the artifact cache."
+            "Extract a PDF you already hold into agent-ready data: the full text "
+            "as markdown (real tables, equations as LaTeX, headings intact) plus a "
+            "figure index of ids, captions and image URLs. Send the file as base64 "
+            "in content_base64. Extraction is by Marker; a dense paper takes "
+            "roughly a minute per page, so this returns the bundle when cached and "
+            "otherwise a job handle to poll with get_job. Identical bytes are a "
+            "cache hit. Scope: NO network — this tool never fetches anything, so "
+            "acquire the PDF yourself; writes only to the artifact cache."
         ),
     )
     server.add_tool(
         tool_get_job,
         name="get_job",
         description=(
-            "Check a background extraction started by fetch_paper. Returns state "
-            "(queued/running/done/error). When done, call fetch_paper again to "
+            "Check a background extraction started by extract_pdf. Returns state "
+            "(queued/running/done/error). When done, call extract_pdf again to "
             "get the bundle from cache. No network scope."
         ),
     )
-    server.add_tool(
-        tool_compile_latex,
-        name="compile_latex",
-        description=(
-            "Compile LaTeX (including Beamer) to a PDF and return its URL, or "
-            "structured errors with file and line when it fails. Supply figures "
-            "via assets as base64 with the relative paths the source references. "
-            "Exactly ONE attempt — this tool does not revise or retry; read the "
-            "errors and resubmit. Runs in an isolated sandbox with no network "
-            "and no shell escape; on a deployment without a sandbox it refuses "
-            "rather than executing untrusted input. Scope: no network, writes "
-            "only to a temporary job directory."
-        ),
-    )
     _register_skills(server)
-    server.add_tool(
-        tool_resolve_paper,
-        name="resolve_paper",
-        description=(
-            "Resolve an arXiv id, DOI, Semantic Scholar id, or free-text title "
-            "to a single paper, reporting whether an open-access full-text "
-            "source exists. Call this before fetching a paper to avoid spending "
-            "an extraction on something with no reachable source. Network "
-            "scope: arxiv.org, api.semanticscholar.org, api.unpaywall.org."
-        ),
-    )
     return server
 
 

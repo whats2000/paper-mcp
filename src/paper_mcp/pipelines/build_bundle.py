@@ -7,14 +7,13 @@ request for the same paper is a cache hit rather than another GPU minute.
 from __future__ import annotations
 
 import logging
+import re
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from paper_mcp.artifacts import ArtifactStore, content_key
-from paper_mcp.bundle import ArtifactRef, Bundle, ExtractionInfo, cap_markdown
-from paper_mcp.models import InvalidArgumentError, PaperRef
-from paper_mcp.pipelines.arxiv_pdf import fetch_arxiv_pdf
+from paper_mcp.bundle import ArtifactRef, Bundle, DocumentRef, ExtractionInfo, cap_markdown
 from paper_mcp.pipelines.marker_client import MarkerClient, page_count
 from paper_mcp.pipelines.marker_to_bundle import marker_doc_to_bundle_parts
 
@@ -25,14 +24,28 @@ MARKDOWN_FILE = "markdown.md"
 BUNDLE_ZIP = "bundle.zip"
 
 
-def bundle_key(paper: PaperRef) -> str:
-    """Content key for a paper reference."""
-    if paper.arxiv_id:
-        return content_key(arxiv_id=paper.arxiv_id)
-    raise InvalidArgumentError(
-        f"{paper.paper_id} has no arXiv id; fetching non-arXiv PDFs by URL is not yet "
-        "supported — resolve_paper reports where an open-access copy lives",
-    )
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+
+
+def bundle_key(pdf: bytes) -> str:
+    """Content key for a document: the hash of its bytes.
+
+    Keying on content rather than an identifier is what lets two callers
+    uploading the same paper share one extraction, and what makes a repeat
+    upload free without the service knowing anything about either caller.
+    """
+    return content_key(data=pdf)
+
+
+def derived_title(markdown: str) -> str | None:
+    """The first heading, or None. Explicitly a guess (SRS §III-3).
+
+    Papers put their title first, so the first heading is usually right — but
+    Marker sometimes leads with a running head or a copyright line, so this is
+    offered as `document.title` marked derived and never as fact.
+    """
+    match = _HEADING_RE.search(markdown)
+    return match.group(1).strip() if match else None
 
 
 def attach_urls(bundle: Bundle, *, store: ArtifactStore) -> Bundle:
@@ -85,28 +98,27 @@ def _write_zip(entry: Path) -> int:
 
 
 async def build_bundle(
-    paper: PaperRef,
+    pdf: bytes,
     *,
+    filename: str | None = None,
     store: ArtifactStore,
     marker: MarkerClient,
     max_pages: int = 1,
     ttl_hours: float = 24.0,
 ) -> Bundle:
-    """Fetch, extract, and cache a paper; return the bundle.
+    """Extract and cache a document from its bytes; return the bundle.
 
-    Marker is the only engine (SRS v0.2). If it is unreachable the error says
-    so rather than falling back to something that would produce worse output.
+    Source-agnostic by design: the caller supplies the PDF, so this never
+    reaches the network. Marker is the only engine (SRS v0.2) — if it is
+    unreachable the error says so rather than falling back to something that
+    would produce worse output.
     """
-    key = bundle_key(paper)
+    key = bundle_key(pdf)
     cached = load_cached(key, store=store)
     if cached is not None:
         logger.debug("bundle cache hit for %s", key)
         return cached
 
-    if not paper.arxiv_id:  # pragma: no cover — bundle_key already guards
-        raise InvalidArgumentError(f"{paper.paper_id} has no arXiv id")
-
-    pdf = await fetch_arxiv_pdf(paper.arxiv_id)
     pages = page_count(pdf)
     logger.info("extracting %s (%d pages) via marker", key, pages)
 
@@ -125,7 +137,13 @@ async def build_bundle(
 
     bundle = Bundle(
         bundle_id=key,
-        paper=paper,
+        document=DocumentRef(
+            content_sha256=key.removeprefix("sha256:"),
+            bytes=len(pdf),
+            pages=pages,
+            title=derived_title(markdown),
+            filename=filename,
+        ),
         markdown=inline,
         markdown_truncated=truncated,
         figures=figures,

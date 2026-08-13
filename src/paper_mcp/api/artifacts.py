@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from paper_mcp.models import InvalidArgumentError
-from paper_mcp.tools.fetch import artifact_store
+from paper_mcp.tools.extract import artifact_store
 
 router = APIRouter()
 

@@ -25,6 +25,11 @@ class Settings:
     # saturating 6 GB, and a 5-page batch taking 21 minutes. 1 is the safe
     # default on a small card; raise it on a bigger GPU.
     marker_max_pages: int
+    # Ceiling on an uploaded PDF. A bound on what reaches the decoder is part
+    # of the containment posture (SRS NFR-02), not just politeness: the papers
+    # this serves are single-digit megabytes, so a generous cap costs nothing
+    # and refuses a file whose only purpose is to exhaust memory.
+    max_upload_bytes: int
     artifact_root: Path
     artifact_ttl_hours: float
     oidc_issuer: str | None
@@ -65,6 +70,7 @@ def settings() -> Settings:
         port=int(os.environ.get("PAPER_MCP_PORT", "8000")),
         marker_url=os.environ.get("PAPER_MCP_MARKER_URL", "http://127.0.0.1:8002"),
         marker_max_pages=int(os.environ.get("PAPER_MCP_MARKER_MAX_PAGES", "1")),
+        max_upload_bytes=int(os.environ.get("PAPER_MCP_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))),
         artifact_root=Path(os.environ.get("PAPER_MCP_ARTIFACT_ROOT", "artifacts")),
         artifact_ttl_hours=float(os.environ.get("PAPER_MCP_ARTIFACT_TTL_HOURS", "24")),
         # This service is a resource server: it validates tokens against an

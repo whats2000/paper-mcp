@@ -16,7 +16,7 @@ Two properties matter beyond "run it later":
 
 Jobs are in-memory and ephemeral. A restart forgets outstanding handles, which
 is survivable precisely because results are content-addressed: calling
-`fetch_paper` again returns the finished bundle from cache rather than
+`extract_pdf` again returns the finished bundle from cache rather than
 recomputing it.
 """
 from __future__ import annotations

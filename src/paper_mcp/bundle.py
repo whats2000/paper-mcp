@@ -19,8 +19,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from paper_mcp.models import PaperRef
-
 # No `pymupdf` member, deliberately. PaperHub shipped crude PyMuPDF document
 # extraction once and reversed it — its v2.19 entry records the output as
 # "conference-UNusable" (hallucinated \includegraphics, wrong figures from
@@ -66,11 +64,37 @@ class ArtifactRef(BaseModel):
     expires_at: str | None = None
 
 
+class DocumentRef(BaseModel):
+    """What was observed about the uploaded document — and nothing more.
+
+    Until v1.0 this was a `PaperRef` carrying a title, authors, year and
+    abstract fetched from arXiv. With the caller supplying bytes there is no
+    such record to fetch, and the service must not invent one: an agent that
+    cites a title the document does not carry has been misled by its tool.
+
+    So every field here is either measured from the bytes or explicitly
+    marked as derived. `filename` is a caller-supplied label, echoed back for
+    display rather than trusted. A caller needing authoritative bibliographic
+    metadata resolves it where the provenance is its own (SRS §III-3).
+    """
+
+    content_sha256: str
+    bytes: int = 0
+    pages: int = 0
+    title: str | None = Field(
+        default=None,
+        description="Best-effort, from the first heading Marker found. Derived, not authoritative.",
+    )
+    filename: str | None = Field(
+        default=None, description="Caller-supplied label. Echoed, never trusted."
+    )
+
+
 class Bundle(BaseModel):
     """A paper, ready for an agent to read."""
 
-    bundle_id: str = Field(description="arxiv:<id> | sha256:<hex>")
-    paper: PaperRef
+    bundle_id: str = Field(description="sha256:<hex> of the source bytes")
+    document: DocumentRef
     markdown: str = ""
     markdown_truncated: bool = Field(
         default=False,

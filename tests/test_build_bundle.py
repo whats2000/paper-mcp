@@ -3,19 +3,18 @@ from __future__ import annotations
 import base64
 import zipfile
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from paper_mcp.artifacts import ArtifactStore, token_for
-from paper_mcp.models import InvalidArgumentError, PaperRef
 from paper_mcp.pipelines import build_bundle as bb
 from paper_mcp.pipelines.build_bundle import build_bundle, bundle_key, load_cached
 from paper_mcp.pipelines.marker_client import MarkerBlock, MarkerDoc
 
 _PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 32).decode()
-_PAPER = PaperRef(paper_id="arxiv:1706.03762", title="Attention", source="arxiv",
-                  arxiv_id="1706.03762")
+# The caller supplies bytes now; the key is their hash, so distinct content
+# means a distinct bundle and identical content is a cache hit.
+_PDF = b"%PDF-1.7\nattention is all you need"
 
 
 class _FakeMarker:
@@ -48,10 +47,11 @@ def _doc() -> MarkerDoc:
 
 @pytest.fixture
 def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _pdf(arxiv_id: str, **_: Any) -> bytes:
-        return b"%PDF-1.7\nfake"
+    """Only the page count needs faking — nothing fetches anything now.
 
-    monkeypatch.setattr(bb, "fetch_arxiv_pdf", _pdf)
+    The name is kept as a statement: after v1.0 there is no network in this
+    path at all, so a test that reached one would be testing a bug.
+    """
     monkeypatch.setattr(bb, "page_count", lambda _data: 15)
 
 
@@ -61,7 +61,7 @@ async def test_builds_a_bundle_with_markdown_and_a_figure_index(
     store = ArtifactStore(tmp_path)
     marker = _FakeMarker(_doc())
 
-    bundle = await build_bundle(_PAPER, store=store, marker=marker)  # type: ignore[arg-type]
+    bundle = await build_bundle(_PDF, store=store, marker=marker)  # type: ignore[arg-type]
 
     assert "## Introduction" in bundle.markdown
     assert "| Model | BLEU |" in bundle.markdown  # tables survive as tables
@@ -76,7 +76,7 @@ async def test_figure_urls_resolve_through_the_store(
 ) -> None:
     store = ArtifactStore(tmp_path)
 
-    bundle = await build_bundle(_PAPER, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
+    bundle = await build_bundle(_PDF, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
 
     figure = bundle.figures[0]
     assert figure.image_url is not None
@@ -91,8 +91,8 @@ async def test_a_second_call_is_a_cache_hit_and_does_not_re_extract(
     store = ArtifactStore(tmp_path)
     marker = _FakeMarker(_doc())
 
-    first = await build_bundle(_PAPER, store=store, marker=marker)  # type: ignore[arg-type]
-    second = await build_bundle(_PAPER, store=store, marker=marker)  # type: ignore[arg-type]
+    first = await build_bundle(_PDF, store=store, marker=marker)  # type: ignore[arg-type]
+    second = await build_bundle(_PDF, store=store, marker=marker)  # type: ignore[arg-type]
 
     assert marker.calls == 1  # the GPU ran once
     assert second.bundle_id == first.bundle_id
@@ -104,7 +104,7 @@ async def test_the_zip_contains_the_full_markdown_and_figures(
 ) -> None:
     store = ArtifactStore(tmp_path)
 
-    bundle = await build_bundle(_PAPER, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
+    bundle = await build_bundle(_PDF, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
 
     assert bundle.artifact is not None
     zip_path = store.dir_for(bundle.bundle_id) / "bundle.zip"
@@ -123,10 +123,10 @@ async def test_cached_urls_follow_the_current_base_url(
     # files are still there, so the failure is silent and total.
     monkeypatch.setenv("PAPER_MCP_PUBLIC_BASE_URL", "http://old.example:8000")
     store = ArtifactStore(tmp_path)
-    await build_bundle(_PAPER, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
+    await build_bundle(_PDF, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
 
     monkeypatch.setenv("PAPER_MCP_PUBLIC_BASE_URL", "https://new.example")
-    cached = load_cached(bundle_key(_PAPER), store=store)
+    cached = load_cached(bundle_key(_PDF), store=store)
 
     assert cached is not None
     assert cached.figures[0].image_url == (
@@ -144,9 +144,9 @@ async def test_no_origin_is_written_to_disk(
     monkeypatch.setenv("PAPER_MCP_PUBLIC_BASE_URL", "http://old.example:8000")
     store = ArtifactStore(tmp_path)
 
-    await build_bundle(_PAPER, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
+    await build_bundle(_PDF, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
 
-    raw = (store.dir_for(bundle_key(_PAPER)) / "bundle.json").read_text(encoding="utf-8")
+    raw = (store.dir_for(bundle_key(_PDF)) / "bundle.json").read_text(encoding="utf-8")
     assert "old.example" not in raw
 
 
@@ -157,7 +157,7 @@ async def test_extraction_warnings_reach_the_caller(
     doc = MarkerDoc(blocks=[MarkerBlock(block_type="Figure", caption="ghost", images={})])
     store = ArtifactStore(tmp_path)
 
-    bundle = await build_bundle(_PAPER, store=store, marker=_FakeMarker(doc))  # type: ignore[arg-type]
+    bundle = await build_bundle(_PDF, store=store, marker=_FakeMarker(doc))  # type: ignore[arg-type]
 
     assert any("ghost" in w for w in bundle.extraction.warnings)
 
@@ -165,7 +165,7 @@ async def test_extraction_warnings_reach_the_caller(
 async def test_an_empty_extraction_is_flagged(tmp_path: Path, _no_network: None) -> None:
     store = ArtifactStore(tmp_path)
 
-    bundle = await build_bundle(_PAPER, store=store, marker=_FakeMarker(MarkerDoc(blocks=[])))  # type: ignore[arg-type]
+    bundle = await build_bundle(_PDF, store=store, marker=_FakeMarker(MarkerDoc(blocks=[])))  # type: ignore[arg-type]
 
     assert any("no text" in w for w in bundle.extraction.warnings)
 
@@ -182,16 +182,17 @@ async def test_a_marker_failure_leaves_no_cache_entry(
     store = ArtifactStore(tmp_path)
 
     with pytest.raises(RuntimeError):
-        await build_bundle(_PAPER, store=store, marker=_Broken())  # type: ignore[arg-type]
+        await build_bundle(_PDF, store=store, marker=_Broken())  # type: ignore[arg-type]
 
-    assert load_cached(bundle_key(_PAPER), store=store) is None
+    assert load_cached(bundle_key(_PDF), store=store) is None
 
 
-def test_a_paper_without_an_arxiv_id_is_a_clear_error() -> None:
-    closed = PaperRef(paper_id="ss:abc123", title="Closed", source="semantic_scholar")
-
-    with pytest.raises(InvalidArgumentError, match="arXiv"):
-        bundle_key(closed)
+def test_the_key_is_the_hash_of_the_bytes() -> None:
+    # Content addressing is what makes a repeat upload free and lets two
+    # callers share one extraction without the service knowing about either.
+    assert bundle_key(_PDF) == bundle_key(b"%PDF-1.7\nattention is all you need")
+    assert bundle_key(_PDF) != bundle_key(b"%PDF-1.7\na different paper")
+    assert bundle_key(_PDF).startswith("sha256:")
 
 
 def test_a_corrupt_cache_entry_reads_as_a_miss(tmp_path: Path) -> None:

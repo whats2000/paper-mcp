@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from paper_mcp.config import settings
 from paper_mcp.server import build_mcp_server, create_app, transport_security
 
-EXPECTED_TOOLS = {"search_arxiv", "search_papers", "find_related", "resolve_paper"}
+EXPECTED_TOOLS = {"extract_pdf", "get_job"}
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def test_health_reports_ok_and_version(_allow_testserver: None) -> None:
     assert body["version"] == "0.1.0"
 
 
-async def test_all_four_discovery_tools_are_registered() -> None:
+async def test_the_extraction_tools_are_registered() -> None:
     server = build_mcp_server()
 
     names = {tool.name for tool in await server.list_tools()}
@@ -51,14 +51,13 @@ async def test_tool_input_schemas_are_generated_from_the_signatures() -> None:
     server = build_mcp_server()
     by_name = {tool.name: tool for tool in await server.list_tools()}
 
-    search = by_name["search_arxiv"].input_schema
-    assert "query" in search["properties"]
-    assert search["required"] == ["query"]  # max_results has a default
+    extract = by_name["extract_pdf"].input_schema
+    assert "content_base64" in extract["properties"]
+    # filename is a label with a default, so only the bytes are required.
+    assert extract["required"] == ["content_base64"]
 
-    related = by_name["find_related"].input_schema
-    # `mode` is a Literal, so the schema must constrain it to the three valid
-    # values rather than accepting any string.
-    assert related["properties"]["mode"]["enum"] == ["cites", "cited_by", "similar"]
+    job = by_name["get_job"].input_schema
+    assert job["required"] == ["job_id"]
 
 
 def test_unlisted_host_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -40,7 +40,7 @@ def content_key(*, arxiv_id: str | None = None, data: bytes | None = None) -> st
     """Build the canonical content key for an artifact.
 
     arXiv ids are used directly: the id already identifies immutable content,
-    and reusing it means `fetch_paper(paper_id)` needs no translation between
+    and reusing it means a caller's id needs no translation between
     the discovery tools' `paper_id` space and this one.
     """
     if arxiv_id:

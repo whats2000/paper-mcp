@@ -19,7 +19,7 @@ def _reset_singletons() -> Iterator[None]:
     """Give every test a clean process-level state, before and after."""
     import paper_mcp.auth as auth_mod
     import paper_mcp.quota as quota_mod
-    import paper_mcp.tools.fetch as fetch_mod
+    import paper_mcp.tools.extract as fetch_mod
 
     def clear() -> None:
         quota_mod.reset_quota_store()
