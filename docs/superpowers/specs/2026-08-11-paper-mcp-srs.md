@@ -1,6 +1,6 @@
 # paper-mcp — Software Requirements Specification
 
-**Status:** v0.4 · **Date:** 2026-08-13
+**Status:** v1.0 · **Date:** 2026-08-13
 **One spec per project.** This document is the single authoritative specification for `paper-mcp`. Architecture, schema, and scope questions are answered here before code.
 
 ---
@@ -9,6 +9,7 @@
 
 | Version | Date | Change |
 | --- | --- | --- |
+| **v1.0** | 2026-08-13 | **Scope reduced to one job: turn a PDF into agent-ready structure.** The surface becomes two tools — `extract_pdf` and `get_job`. Discovery, paper fetching, and LaTeX compilation are removed. *Discovery* because it does not work well enough to ship: measured across a full verification session, `search_papers` returned a typed `rate_limited` on every attempt without an API key and never once produced a result, and `search_arxiv` surfaced none of the three canonical WMT papers for a query naming that exact benchmark. The stable parts (`find_related` in all three modes, id-based `resolve_paper`) go with them, because a mediocre discovery surface next to a good extraction surface teaches a calling agent to distrust both — and an agent already has better ways to find a paper. *Fetching* because the caller can fetch its own PDF, and content-addressed caching keyed on the bytes (`content_key(data=…)`, already implemented) preserves the deduplication that `fetch_paper`'s arXiv cache provided. *LaTeX* because authoring a deck is the caller's pipeline, not this service's. The consequences are larger than the deletions: nsjail and five TeX Live package sets leave the image (~1 GB → a fraction of it), `seccomp=unconfined` is no longer required, and **the threat model that dominated v0.1–v0.4 — a public endpoint executing untrusted TeX — ceases to exist rather than needing defence.** One risk is *added*: accepting caller-supplied PDFs removes the arXiv-only restriction that earlier revisions identified as the control over who may feed `marker-pdf`'s unpatchable `pillow` (section numbers in the rows below refer to the document as it stood at that revision). On a shared endpoint that risk is borne by every caller, so the control is replaced rather than dropped (NFR-02, §III-6). Finally, without an arXiv lookup there is no verified bibliographic metadata, so the bundle stops asserting any: `PaperRef` is replaced by observed facts (§III-3). |
 | **v0.4** | 2026-08-13 | **Security is verified against the running service, and artifact URLs are derived rather than stored.** Two verification layers are added to §III-10 as release gates, run from local harnesses rather than committed scripts: an attack matrix against the **container** with a real IdP (26 controls: token forgery incl. `alg=none` and RS256→HS256 confusion, audience/issuer/expiry/signature, uniform rejection bodies, `Host` rebinding, six traversal encodings, quota + `Retry-After`, sandbox probes through the real tool), and its converse — the whole product driven through a real MCP client **with the guards armed**, because a service that rejects everyone is trivially secure and useless. Neither may use an in-process test client: `TestClient` follows redirects, which is exactly how a `307` on `POST /mcp` passed the suite. A security check must also prove the **installed** artifact carries the controls it attacks — an early run reported a total auth bypass that existed only in a stale image. That layer immediately paid for itself by finding a defect no unit test could see: §III-4 bundles **persisted absolute artifact URLs**, so a cache surviving a redeploy on a new origin (a named volume, by design) replayed dead figure links while the files sat intact on disk — silent, because the bundle still looked complete. A URL is deployment state, not content: it is now materialized on every serve from the current `public_base_url`, and `bundle.json` stores no origin at all. |
 | **v0.3** | 2026-08-13 | **Purpose sharpened: ready-to-use TOOLS for precise paper processing — data first, tools not flows.** The service provides *data-processing functionality*; the pipelines built on it (slides, summaries, literature reviews) belong to the calling agent and its own skills, which can assemble them freely. Consequences: the bundle collapses to **markdown + a figure index** (FR-03), because that is what an agent needs to work precisely — the section index, equation index, and outline/full duality are removed, since Marker emits headings an agent navigates natively and inlines equations as LaTeX, making a parallel index a second copy to keep honest. `get_section` is deleted; FR-04 becomes artifact retrieval. `compile_latex` stays, explicitly **as a tool rather than an agent flow** — it compiles and returns structured errors; it never loops, revises, or authors. Portable skills (FR-10) are demoted from a headline deliverable to a convenience: useful starting points, but the calling agent owns its pipelines. |
 | **v0.2** | 2026-08-13 | **Marker is the required PDF extraction engine; the PyMuPDF fallback is removed.** Correcting spec drift: v0.1 recorded a `default` (CPU, PyMuPDF) compose profile with Marker as an opt-in `gpu` upgrade, and claimed "v1 is not blocked on GPU capacity." That contradicted the scope actually chosen for v1 and, worse, re-proposed an experiment PaperHub had already run and reversed — its v2.19 entry records crude PyMuPDF figure extraction producing "conference-UNusable" output (hallucinated `\includegraphics`, wrong figures from filename collisions), replaced by Marker-based structured ingestion. This service exists to supply *faithful* extraction, so quietly substituting unfaithful extraction is the one degradation it must not offer. Consequences: `fetch_paper`'s engine enum drops `pymupdf` (FR-03); Marker ships as a required component rather than a profile (FR-11); a Marker-less host reports `extraction_unavailable` for PDFs instead of degrading (§III-9); PDF ingestion is asynchronous by necessity, since PaperHub measured 21 minutes for a 5-page dense batch (§III-9, FR-06). PyMuPDF stays only for rasterizing individual vector figure files in the LaTeX path — image conversion, not document understanding. |
@@ -18,20 +19,17 @@
 
 # Part 0 — Requirement Coverage Matrix
 
-| Requirement | Addressed in |
+| Concern | Covered by |
 | --- | --- |
-| External agent clients can discover papers | FR-01 (`search_arxiv`, `search_papers`, `find_related`), FR-02 (`resolve_paper`) |
-| External agent clients can obtain agent-ready paper content | FR-03 (`fetch_paper` → markdown + figure index), §III-3 |
-| External agent clients can compile LaTeX / Beamer decks | FR-05 (`compile_latex`), §III-6 |
-| Long operations survive a remote MCP call timeout | FR-06 (job lifecycle, `get_job`), §III-5 |
-| Multiple users share one endpoint without leaking data | NFR-01 (statelessness — nothing per-user exists to leak), FR-08 (identity for quota/revocation, *not* for data separation), §II-1 |
-| A public endpoint executing untrusted TeX is safe | NFR-02 + FR-05 + §III-6 (nsjail, no network, rlimits, `-no-shell-escape`); acceptance §I-8 #4 |
-| Shared expensive resources are not starved by one caller | FR-09 (per-subject quota, GPU serialization) |
-| The proven PaperHub flow is preserved, not re-invented | FR-10 (portable skills), NFR-06 (provenance), §III-8 |
-| Reproducible deployment on a cluster host | FR-11 (container + compose profiles), NFR-07, §III-9 |
-| Operability without user-data collection | FR-12 (structured logs, no request-body persistence), NFR-01 |
-
-When requirements evolve, a new row is added here alongside its FR/NFR — never silently absorbed.
+| An agent can turn a PDF it holds into precise, agent-ready structure | FR-01 (`extract_pdf`), §III-3 |
+| Extraction longer than a remote call budget still completes | FR-02 (`get_job`), §III-5 |
+| Figures and full text are retrievable without bloating the response | FR-03, FR-04, §III-4 |
+| Multiple users share one endpoint without leaking data | NFR-01 (statelessness — nothing per-user exists to leak), FR-05 (identity for quota only) |
+| A caller's malicious PDF cannot harm the host or other callers | NFR-02, §III-6 (Marker containment); acceptance §I-8 #5 |
+| Shared GPU is not starved by one caller | FR-06 (per-subject quota, GPU serialization) |
+| Extraction never loses data silently | FR-01 (cell accounting), acceptance §I-8 #3 |
+| A figure citation always resolves to what its caption claims | FR-01 (figure index integrity), acceptance §I-8 #4 |
+| Operability without user-data collection | FR-08, NFR-01 |
 
 ---
 
@@ -39,96 +37,72 @@ When requirements evolve, a new row is added here alongside its FR/NFR — never
 
 ## I-1. Background
 
-PaperHub is a paper-aware chat client built as a proof of concept. Over ~40 iterations it established a working pipeline:
+`paper-mcp` supplies one capability that agents cannot do well themselves: turning a paper PDF into structure faithful enough to compute on. The extraction pipeline is ported from the [PaperHub](https://github.com/whats2000/PaperHub) proof-of-concept, which validated it inside a single-user local application. PaperHub proved the pipeline; the delivery target here is a remote, multi-user MCP service.
 
-- **Acquisition** — arXiv source, Semantic Scholar metadata, Unpaywall open-access resolution.
-- **Extraction** — LaTeX-source → structured asset; PDF → structured asset via **Marker**; a unified asset of figures + captions, equations as LaTeX, and an ordered section list. **PyMuPDF is not a document-extraction engine here.** PaperHub tried it and reversed the decision: its v2.19 entry records that crude PyMuPDF figure extraction produced "conference-UNusable" output — hallucinated `\includegraphics`, wrong figures from filename collisions — and the redesign replaced it with Marker-based structured ingestion. Repeating that experiment is not on the table.
-- **Grounded authoring** — a sequence of prompts (narrative planning → draft → coherence pass → figure verification) that reliably produces a slide deck citing only figures that exist.
-- **Compilation** — Beamer/LaTeX compile with engine selection, CJK font injection, overflow detection, and math auditing.
-
-That flow works. What PaperHub cannot do is *serve* it: it is a single-user local application whose value is locked behind its own chat UI. The observed need is the inverse — capable agent clients already exist (Cowork, Desktop, Cursor, bespoke frameworks) and have strong models; **what they lack is paper acquisition, faithful extraction, and a working LaTeX toolchain.**
-
-`paper-mcp` supplies exactly that, and nothing else. It is **data-processing functionality wrapped as ready-to-use tools** — not an agent, not a workflow engine. A calling agent composes pipelines from these tools using its own skills; this service's only job is to make each step precise.
+v1.0 narrows the service to that one capability. Everything else it offered — finding papers, downloading them, compiling LaTeX — either did not work well enough to ship, or is work the calling agent is already better placed to do.
 
 ## I-2. Problem Statement
 
-An agent asked to "read this paper and build me a deck" today must: find the paper, download it, parse a PDF badly, hallucinate figure references it cannot verify, and emit LaTeX it has no way to compile. Each step is a known failure mode, and none of them are the model's core competence.
+An agent handed a paper PDF has no reliable way to read it precisely. Naïve text extraction destroys exactly what matters: tables flatten into a blob of cell values, equations degrade into prose approximations, and figures are lost or invented. An agent that reads `27.3 | 38.1` under a heading of `Training Cost (FLOPs)` will report a BLEU score as a compute budget, and nothing about the output looks wrong.
 
-The gap is **tools, not intelligence**. A stateless service that does acquisition, extraction, and compilation deterministically — and hands back the paper as usable data — removes every one of those failure modes without competing with the client's model.
-
-The division is deliberate: **this service supplies data and capabilities; the agent supplies the process.** Anything that looks like orchestration, authoring, or iterative repair belongs on the caller's side, where the model and the user's actual context live.
+The service exists to make that failure impossible, or — where the underlying extraction genuinely loses data — impossible to *miss*.
 
 ## I-3. Users
 
-| Role | Interaction |
-| --- | --- |
-| **Agent client** (primary) | Claude Cowork / Desktop / Cursor / LangGraph / any MCP framework. Calls tools over remote MCP; authenticates with an OAuth bearer token. |
-| **End user** | A researcher operating that client. Never talks to `paper-mcp` directly; grants their client access via a connector. |
-| **Operator** | Runs the container on a cluster host, configures the IdP, sets quotas, provisions the GPU profile and outbound API keys. |
+External agent clients (Claude Cowork, Claude Desktop, Cursor, any MCP framework) acting for a human researcher, on a shared endpoint. A caller is a quota subject, never an account.
 
 ## I-4. Use Cases
 
-**UC-1 — Find a paper.** Agent calls `search_arxiv` / `search_papers` with a topic query, receives ranked `PaperRef`s with abstracts and open-access status, and picks one.
-
-**UC-2 — Read a paper.** Agent calls `fetch_paper` and receives the paper as markdown — real tables, equations as LaTeX, headings intact — plus a figure index of ids, captions and image URLs. It reads and navigates that markdown itself. No unzip, no PDF parsing, no second API to learn.
-
-**UC-3 — Build a grounded deck.** Agent loads the `paper-to-deck` skill, follows its flow against the tools, writes Beamer LaTeX referencing figures **from the manifest** (so they provably exist), calls `compile_latex`, and receives a PDF URL — or structured errors it fixes and resubmits.
-
-**UC-4 — Follow a citation trail.** Agent calls `find_related(paper_id, mode="cited_by")` to walk the citation graph, then `fetch_paper` on the interesting nodes.
-
-**UC-5 — Process a private manuscript.** Agent calls `fetch_paper(url=...)` on a PDF. The content is keyed by its own `sha256`, so it is reachable only by someone who already has the file.
-
-**UC-6 — Long extraction.** A dense scanned PDF exceeds the remote-call budget. `fetch_paper` returns a `job_id`; the agent polls `get_job` and collects the bundle when ready.
+1. A coworker hands an agent a PDF; the agent uploads the bytes and reads the paper's structure.
+2. An agent extracts results tables from several papers in one domain and joins them into a dataset, carrying provenance and knowing which tables were incomplete.
+3. An agent answers "show me the architecture diagram" by resolving a figure id to an image that genuinely contains it.
 
 ## I-5. Functional Requirements
 
 | ID | Name | Description |
 | --- | --- | --- |
-| **FR-01** | Discovery tools | `search_arxiv(query, max_results)` (arXiv API), `search_papers(query, max_results)` (Semantic Scholar `/graph/v1/paper/search`), `find_related(paper_id, mode ∈ {cites, cited_by, similar}, max_results)`. All return `PaperRef[]` (§III-2). Pure functions: no writes, no state, identical output for identical input modulo upstream data. `max_results` clamped server-side to `[1, 50]`. **`similar` is not a citation-graph endpoint** — `graph/v1/paper/{id}/related` does not exist and 404s misleadingly; similar papers come from the separate Recommendations service, which returns an empty list unless `from=all-cs` is passed. **Operational dependency:** a Semantic Scholar API key is effectively required — measured on-device, the keyless tier throttles `/paper/search` past 237 s of paced retries while single-paper and citation-graph lookups succeed, so `search_papers` and title-based `resolve_paper` are degraded without one (§III-9). |
-| **FR-02** | Paper resolution | `resolve_paper(identifier)` accepts an arXiv ID, DOI, S2 paper ID, or free-text title and returns a canonical `PaperRef` plus **open-access availability** — arXiv source first, then `openAccessPdf`, then Unpaywall (when `UNPAYWALL_EMAIL` is configured). Returns `open_access.available=false` with the reason rather than erroring when no ingestible source exists. |
-| **FR-03** | Paper bundle | `fetch_paper(paper_id \| url)` returns the paper as **markdown plus a figure index** — the two things an agent needs to work precisely. Markdown carries real tables (rows and columns intact), equations as LaTeX, and Marker's heading structure; the index carries `{id, caption, page, image_url}` per extracted figure. **Marker produces it**; nothing re-derives or "improves" its output. Bundles are keyed `arxiv:<id>` or `sha256:<hex>`; a repeat call is a cache hit. Markdown is capped at 200k characters with an explicit `markdown_truncated` flag — silent truncation would let an agent conclude a paper omits something it discusses on page 30 — and the full text always remains in the artifact zip. **No section index, no equation index, no outline/full duality:** an agent navigates markdown natively, and a parallel index is a second copy to keep honest. |
-| **FR-04** | Artifact retrieval | Bundle artifacts (figure images, the full markdown, the zip) are served at `GET /a/<token>/<path>` from the content-addressed store. `token` is unguessable, `path` is validated against traversal, and an unknown or expired token returns a typed error naming `fetch_paper` as the next step — never a silent empty. |
-| **FR-05** | LaTeX compilation | `compile_latex(tex, assets?, engine ∈ {auto, pdflatex, xelatex, lualatex}, timeout_s?)` compiles caller-supplied source **inside the sandbox** (§III-6) and returns `{ok, engine, page_count, pdf_url, log_tail, errors[], warnings[]}`. `errors[]` is **structured** (`file`, `line`, `message`, `kind`) parsed from the log, not a raw dump. `warnings[]` carries overflow-box and math-audit findings ported from PaperHub. `assets` supplies figures by relative path (base64 or an artifact URL from a prior `fetch_paper`). **Exactly one compile attempt** — there is no server-side revise loop; the caller's model fixes the errors. Engine auto-selection ports PaperHub's `select_engine` + CJK font logic. |
-| **FR-06** | Job lifecycle | Any tool whose work may exceed the remote-call budget returns either a completed result or `{job_id, state}`. `get_job(job_id)` returns `{state ∈ {queued, running, done, error}, progress?, result?, error?}`. Jobs are ephemeral runtime records (§III-5) with a TTL, keyed by an unguessable id, holding **no caller identity beyond the quota subject**. A job whose result is content-addressed is deduplicated: two callers requesting the same uncached paper join one job. |
-| **FR-07** | Artifact store | Bundles and compiled PDFs are written to a **content-addressed** store (§III-4) and served over HTTP at an unguessable path with an expiry. A TTL sweeper reclaims them. Artifacts hold only derived data; no identity, no session, no DB row. Re-deriving an expired artifact is always possible from its key. |
-| **FR-08** | Authentication | The service is an **OIDC resource server**: it validates a bearer JWT against a configured issuer + audience (JWKS fetched and cached) and rejects anything else with `401`. It is **not** an authorization server — the operator brings an IdP. Identity exists for **quota and revocation only**; it grants no data scoping, because there is no per-user data (NFR-01). An `AUTH_MODE=open` setting exists for local development and closed networks and **must** be logged loudly at boot. |
-| **FR-09** | Quota + fair use | Per-subject token buckets on (a) calls/minute, (b) extractions/hour, (c) compile-seconds/hour, configured by the operator. Marker GPU work is **globally serialized** (one dense page can saturate ~6 GB VRAM — a PaperHub-measured constraint). Exceeding a bucket returns a typed `quota_exceeded` error with `retry_after`, never a hang. Unauthenticated mode falls back to per-IP buckets. |
-| **FR-10** | Portable skills *(convenience, not a headline)* | Starting-point skill bundles (`skills/<name>/SKILL.md`, also exposed as MCP `prompts/`) that show a calling agent how to combine these tools — e.g. read a paper, then ground a deck in its figure index. They are **examples, not the product**: the calling agent owns its pipelines and can assemble them from its own skills, which is precisely why this service ships tools rather than flows (§I-2). No server-side LLM inference either way (NFR-01). Authored through the `writing-agent-prompts` discipline when written at all. |
-| **FR-11** | Containerized deployment | One image carries the service, TeX Live (with `beamer`, `metropolis`, Fira, CJK fonts), pandoc, and nsjail. **`docker compose up` starts the service *and* Marker — Marker is a required component, not an opt-in profile**, so the NVIDIA container toolkit and a GPU are baseline requirements for a full deployment. A GPU-less host can still run the service for arXiv-source papers and LaTeX compilation; PDF ingestion reports `extraction_unavailable` rather than degrading silently. `MARKER_MAX_PAGES` bounds per-call VRAM (PaperHub measured VRAM scaling with page *content density*, not page count). |
-| **FR-12** | Observability | Structured JSON logs per call: tool name, subject hash, duration, outcome, artifact key, extraction engine, sandbox exit reason. **Request bodies, LaTeX source, and paper content are never logged.** API keys and paths are redacted (ported redactor). A `/health` endpoint reports service, TeX, and Marker reachability. |
+| **FR-01** | PDF extraction | `extract_pdf(content_base64, filename?)` returns the document as **markdown plus a figure index** — the two things an agent needs to work precisely. Markdown carries real tables (rows and columns intact), equations as LaTeX, and Marker's heading structure; the index carries `{id, caption, page, image_url}` per extracted figure. **Marker produces it**; nothing re-derives or "improves" its output. Keyed `sha256:<hex>` of the bytes, so a repeat upload — by the same caller or a different one — is a cache hit and joins one extraction. Markdown is capped at 200k characters with an explicit `markdown_truncated` flag; the full text always remains in the artifact zip. Uploads over `PAPER_MCP_MAX_UPLOAD_BYTES` (default 25 MB) are rejected at the boundary with a typed error. **Extraction that loses data must say so:** when a rendered table carries fewer cells than Marker found, the shortfall is reported in `extraction.warnings`, because a silently truncated table is indistinguishable from a complete one. **A figure is indexed once:** a figure whose bounding box lies wholly inside another figure's on the same page is a panel of it and is not indexed separately, since both inherit the same caption and the crop would resolve to an image the caption misdescribes. |
+| **FR-02** | Job lifecycle | Extraction exceeds a remote-call budget, so `extract_pdf` returns either a completed bundle (cache hit) or `{job_id, state}`. `get_job(job_id)` returns `{state ∈ {queued, running, done, error}, progress?, result?, error?}`. Jobs are ephemeral runtime records (§III-5) with a TTL, keyed by an unguessable id, holding **no caller identity beyond the quota subject**. Two callers uploading identical bytes join one job. |
+| **FR-03** | Artifact retrieval | Bundle artifacts (figure images, the full markdown, the zip) are served at `GET /a/<token>/<path>` from the content-addressed store. `token` is unguessable, `path` is validated against traversal, and an unknown or expired token returns a typed error naming `extract_pdf` as the next step — never a silent empty. |
+| **FR-04** | Artifact store | Bundles are written to a **content-addressed** store (§III-4) and served over HTTP at an unguessable path with an expiry. A TTL sweeper reclaims them. Artifacts hold only derived data; no identity, no session, no DB row. Artifact URLs are **derived at serve time** from the configured public base URL and never persisted (v0.4). Re-deriving an expired artifact is always possible from its key, given the same bytes. |
+| **FR-05** | Authentication | The service is an **OIDC resource server**: it validates a bearer JWT against a configured issuer + audience (JWKS fetched and cached) and rejects anything else with `401`. It is **not** an authorization server — the operator brings an IdP. Identity exists for **quota and revocation only**; it grants no data scoping, because there is no per-user data (NFR-01). An `AUTH_MODE=open` setting exists for local development and closed networks and **must** be logged loudly at boot. |
+| **FR-06** | Quota + fair use | Per-subject token buckets on (a) calls/minute and (b) extractions/hour, configured by the operator. Marker GPU work is **globally serialized** (one dense page can saturate ~6 GB VRAM — a PaperHub-measured constraint). Exceeding a bucket returns a typed `quota_exceeded` error with `retry_after`, never a hang. Unauthenticated mode falls back to per-IP buckets. |
+| **FR-07** | Containerized deployment | `docker compose up` starts the service **and** Marker; Marker is a required component, not an opt-in profile, so the NVIDIA container toolkit and a GPU are baseline requirements. A GPU-less host reports `extraction_unavailable` rather than degrading silently — substituting unfaithful extraction is the one degradation this service must not offer (v0.2). `MARKER_MAX_PAGES` bounds per-call VRAM. The service image carries no TeX distribution and no nsjail, and runs under Docker's default seccomp profile. |
+| **FR-08** | Observability | Structured JSON logs per call: tool name, subject hash, duration, outcome, artifact key, extraction engine. **Request bodies and document content are never logged.** API keys and paths are redacted. A `/health` endpoint reports service and Marker reachability, and — when Marker's accuracy pass is enabled — the **model name** backing it, so `use_llm: true` can be checked against a model that still exists rather than merely asserting a key was present. |
 
 ## I-6. Non-Functional Requirements
 
 | ID | Category | Target |
 | --- | --- | --- |
-| **NFR-01** | **Statelessness** | No user accounts, no sessions, no chat history, no per-user library, **no server-side LLM calls**. The only persistence is a content-addressed artifact cache of derived public-paper data and an ephemeral job table. *This is the security architecture*: a shared endpoint is safe because there is nothing per-user to cross. Any proposal introducing per-user state must first amend this requirement. |
-| **NFR-02** | **Sandbox containment** | Caller-supplied TeX executes with no network, a read-only root, a tmpfs-only work dir, an unprivileged uid, and cpu/mem/pids/wall-clock/output limits. Escape attempts fail closed and are logged. Verified by an adversarial test suite that is a **release gate**, not a nice-to-have (§I-8 #4). |
-| **NFR-03** | Latency | Discovery tools ≤ 3 s p95. `fetch_paper` cache hit ≤ 500 ms. arXiv-LaTeX extraction ≤ 30 s p95 (synchronous). PDF extraction is asynchronous by default. `compile_latex` on a ≤ 30-slide deck ≤ 45 s p95. |
+| **NFR-01** | **Statelessness** | No user accounts, no sessions, no history, no per-user library, **no server-side LLM calls**. The only persistence is a content-addressed artifact cache of derived data and an ephemeral job table. *This is the security architecture*: a shared endpoint is safe because there is nothing per-user to cross. Any proposal introducing per-user state must first amend this requirement. |
+| **NFR-02** | **Decoder containment** | Marker is treated as a sandbox boundary, not a trusted internal service. `marker-pdf` pins `pillow<11` at every released version while current image-decode advisories are fixed in 12.3.0; upgrading is not available, so the control is what an exploit can reach. The Marker container runs with **no network egress, non-root, a read-only root filesystem with a tmpfs scratch, all capabilities dropped, and a hard memory limit**, published on loopback only. Uploads are size-capped (FR-01) and page-capped. Verified by an adversarial corpus that is a **release gate** (§I-8 #5). |
+| **NFR-03** | Latency | Cache hit ≤ 500 ms. Extraction is asynchronous by default; measured warm throughput is ~10 s per page on a 6 GB consumer GPU, so a 15-page paper completes in ~2.5 minutes. |
 | **NFR-04** | Typing | Python 3.12+, Pydantic v2 models on every tool boundary, `mypy --strict` clean, `ruff` clean. Tool input schemas are generated from the models — one source of truth. |
-| **NFR-05** | Declared scope per tool | Every tool declares its scope in its description (network egress, filesystem reach, resource ceiling). Out-of-scope arguments are rejected at the boundary with a typed error, never partially executed. |
+| **NFR-05** | Declared scope per tool | Every tool declares its scope in its description (network egress, filesystem reach, resource ceiling). With v1.0 the honest declaration is narrow: **the service makes no outbound network calls at all.** Out-of-scope arguments are rejected at the boundary with a typed error, never partially executed. |
 | **NFR-06** | Provenance | Every file copied from PaperHub carries a header comment naming the source path and commit. Adaptation is expected; silent copying is not. The dependency arrow points one way — `paper-mcp` imports nothing from PaperHub. |
-| **NFR-07** | Reproducibility | Pinned dependencies via `uv` lockfile; pinned base image digest; the container builds from a clean checkout with no network access to anything unpinned. |
+| **NFR-07** | Reproducibility | Pinned dependencies via `uv` lockfile; pinned base image digest. **A pinned application does not imply a pinned runtime:** `marker-pdf` is pinned at 1.10.2 while its transitive `torch` floated to 2.13, which dispatches through Triton and JIT-compiles a CUDA module on first use — so the image must carry `gcc` *and* `libc6-dev`, or every GPU inference fails at runtime with a healthy-looking service. Runtime toolchain requirements are part of reproducibility, not build convenience. |
 
 ## I-7. Out of Scope
 
-- **No server-side LLM inference.** Not for extraction cleanup, not for slide authoring, not for error repair. Intelligence ships as skills (FR-10). *(The one exception is Marker's operator-configured `use_llm` extraction-accuracy pass, which is an internal quality knob on a deterministic pipeline, disabled by default and never exposed as a tool.)*
-- **No user accounts, profiles, libraries, or history.** Identity is a quota key (FR-08).
-- **No chat interface, no agent loop, no orchestration.** Callers bring their own.
-- **No vector store or embeddings.** Navigation is structural (outline → targeted section read), the approach PaperHub validated.
-- **No dependency on PaperHub**, and no obligation to stay in sync with it.
-- **No multi-node HA or horizontal autoscaling in v1.** Single host, single artifact volume. The artifact store is behind an interface so an S3 backend can be added without touching tool code.
-- **No billing, metering export, or per-seat licensing.**
-- **No document viewer, rendering UI, or web frontend** beyond artifact download endpoints and `/health`.
+- **No discovery.** No search, no citation graph, no resolution by title or DOI. Removed in v1.0 on measured evidence, not preference.
+- **No paper fetching.** The caller supplies bytes. The service makes no outbound requests.
+- **No LaTeX compilation, no document generation.** Authoring belongs to the calling agent.
+- **No server-side LLM inference.** *(The one exception is Marker's operator-configured `use_llm` extraction-accuracy pass, an internal quality knob on a deterministic pipeline, never exposed as a tool.)*
+- **No user accounts, profiles, libraries, or history.** Identity is a quota key (FR-05).
+- **No vector store or embeddings.** Navigation is structural.
+- **No multi-node HA or horizontal autoscaling in v1.** Single host, single artifact volume, behind an interface so an S3 backend can be added without touching tool code.
+- **No document viewer or web frontend** beyond artifact download endpoints and `/health`.
 
 ## I-8. Acceptance Criteria
 
-1. **Connector reachability.** A Claude Cowork custom connector pointed at the deployed URL completes the OAuth flow, lists all eight tools, and successfully calls `search_arxiv`. *(Note: Cowork brokers remote MCP through Anthropic's servers, so the endpoint must be publicly reachable — a VPN-only host fails this criterion by construction.)*
-2. **End-to-end grounded deck.** From a cold cache, an agent using the `paper-to-deck` skill turns an arXiv ID into a compiled PDF, and **every figure in the deck appears in the bundle's figure manifest** — zero hallucinated figures across 5 test papers.
-3. **Extraction parity with the PoC.** For a 10-paper fixture corpus, `fetch_paper` produces section lists and figure manifests matching PaperHub's cached `PaperAsset` output (same section count, same figure ids/captions) — proving the port preserved behaviour.
-4. **Sandbox holds (release gate).** An adversarial corpus — `\write18{...}`, `\input{/etc/passwd}`, `\openout` to an absolute path, a network fetch, a fork bomb, unbounded expansion, and a multi-GB output — **all fail closed** with a typed error, no host filesystem read outside the jail, no egress, and no process outliving its wall-clock limit. Any failure blocks release.
-5. **Statelessness verified.** After a full functional test run, the deployment holds no record linking any subject to any paper, query, or compile. Verified by inspecting every persisted store.
-6. **Quota enforced.** A caller exceeding each configured bucket receives `quota_exceeded` with `retry_after`; a second caller is unaffected during that window.
-7. **No silent failure.** Every error path — unresolvable paper, no open-access source, extraction failure, compile failure, expired bundle, sandbox kill, quota — returns a **typed, actionable** error naming the next step. Verified case by case.
+1. **Connector reachability.** A remote MCP client pointed at the deployed URL completes the OAuth flow, lists both tools, and completes an extraction.
+2. **Extraction fidelity, verified against source.** For a fixture corpus, values extracted from tables match the PDFs read directly — verified per value, not spot-checked. Where the same figure is reported by two different papers, the extracted values agree.
+3. **Never silently lossy (release gate).** For a table whose render drops cells, `extraction.warnings` reports the shortfall with counts. A run that loses data without a warning fails this criterion.
+4. **Figure index integrity (release gate).** Every indexed figure resolves over HTTP to an image whose content matches its caption, no two index entries share a caption, and no entry is a sub-panel of another. Verified by opening the images, not by counting them.
+5. **Containment holds (release gate).** An adversarial PDF corpus — malformed streams, decompression bombs, oversized and zero-byte inputs, encrypted files — fails closed with a typed error, with no egress from the Marker container, no process outliving its limits, and no host filesystem write outside the jail. Any failure blocks release.
+6. **Statelessness verified.** After a full functional run, the deployment holds no record linking any subject to any document. Verified by inspecting every persisted store.
+7. **Quota enforced.** A caller exceeding each configured bucket receives `quota_exceeded` with `retry_after`; a second caller is unaffected during that window.
+8. **No silent failure.** Every error path — unreadable PDF, oversize upload, extraction failure, expired artifact, quota — returns a **typed, actionable** error naming the next step.
 
 ---
 
@@ -136,57 +110,27 @@ The division is deliberate: **this service supplies data and capabilities; the a
 
 ## II-1. Why stateless, when the PoC was database-centric?
 
-The moment the delivery target became "a service multiple people connect to," PaperHub's design became a liability: `paper_content`, `chat_sessions`, and `memories` are all global with no owner column, so exposing them would leak every user's library, session titles, and standing preferences to every other user.
+PaperHub is single-user and stores everything. A shared endpoint that stores per-user data must then defend it. Storing nothing removes the class of failure rather than defending against it: there is no per-user record to leak, so a leak requires inventing state first (NFR-01).
 
-Three postures were considered:
+## II-2. Why remove discovery rather than fix it?
 
-| Posture | Verdict |
-| --- | --- |
-| Deployment boundary (one instance per user) | Rejected — contradicts the actual requirement of a shared cluster service |
-| Capability-scoped workspaces | **Rejected as a half-measure.** It isolates sessions while the shared library and global memory — the content that actually matters — stay shared. It buys the feeling of safety, not safety |
-| Real multi-tenancy (`owner_id` everywhere, auth, filtered queries) | Rejected as scope: it reverses the PoC's foundational assumption and touches every table, query, and agent |
+The failure was measured, not assumed. Across a full verification session, `search_papers` returned `rate_limited` on every attempt and never once produced a result without an API key; `search_arxiv` — which needs no key and does work — returned none of the three canonical papers for a query naming the exact benchmark those papers introduced. Requiring an operator to obtain a third-party API key so that one tool becomes usable is a poor trade when the capability is not the product.
 
-The chosen fourth option — **delete the state** — dissolves the problem instead of managing it. With no per-user data, tenancy is not a requirement at all; identity degrades to a quota key. This is why NFR-01 is written as a *security* requirement, not a performance one.
+The stable parts were removed with the rest. `find_related` worked reliably in all three modes and `resolve_paper` worked for arXiv and S2 ids, but a tool surface teaches a calling agent what the service is for. A narrow surface that is entirely trustworthy is worth more than a broad one where two tools are excellent, two are adequate, and one never works.
 
-## II-2. Why not just add tools to PaperHub?
+## II-3. Why containment rather than validation, for untrusted PDFs?
 
-Incompatible trust models, and the difference is not cosmetic:
+The advisories in `marker-pdf`'s dependency tree are image-decode bugs in `pillow`, reachable through images that are otherwise perfectly legitimate. Pre-validating a PDF cannot reliably detect one; the payload is a valid image. Capping size and page count defeats resource exhaustion, but the decode path stays reachable by design — the service exists to decode documents.
 
-| | PaperHub | paper-mcp |
-| --- | --- | --- |
-| Users | one, no auth | many, authenticated |
-| Network | localhost / private compose | public internet (Anthropic's IPs inbound) |
-| State | SQLite is the point | none by design |
-| Untrusted input | none — the operator types it | **caller-supplied LaTeX, executed** |
-| Deps | LangGraph, aiosqlite, React | extraction + TeX + sandbox |
+So the control is what an exploit reaches, not whether it triggers. A Marker container with no egress, no capabilities, a read-only root, and a memory ceiling turns a decoder RCE from a foothold into a dead end. This is the same posture v0.1 chose for LaTeX with nsjail, applied to the one untrusted input that remains.
 
-A service that executes untrusted code for strangers must not share a process, a deployment, or a dependency tree with a single-user local app that has no auth.
+## II-4. Why accept uploads at all, when arXiv-only was a control?
 
-## II-3. Why nsjail inside the container, not Docker-in-Docker or a VM?
+Because the restriction protected less than it appeared to. Anyone can publish a PDF to arXiv, so "arXiv-only" bounded *casual* access to the decoder rather than establishing trust in the content. Meanwhile it excluded the service's central use case: a colleague hands you a paper. Trading a weak control for the actual product is worthwhile only if the strong control replaces it, which is what NFR-02 requires.
 
-`pdflatex` on caller-supplied input is arbitrary code execution — TeX is Turing-complete, `\write18` shells out, `\input` reads arbitrary paths, and `\openout` writes them.
+## II-5. Why an OIDC resource server rather than our own auth?
 
-| Option | Verdict |
-| --- | --- |
-| Container-per-compile via the Docker socket | **Rejected.** Mounting the socket grants a compile job root on the host — strictly worse than no sandbox |
-| microVM (Firecracker) per compile | Over-engineered for v1: hundreds of ms of boot per compile, a second image lifecycle, and cluster privileges we may not have |
-| **nsjail inside the service container** | **Chosen.** Namespaces + seccomp + rlimits, no privileged host access, ~ms overhead, one image. Defence in depth: the container is already a boundary; nsjail makes each compile a boundary within it |
-
-TeX-level hardening (`-no-shell-escape`, `openin_any=p`, `openout_any=p`) is applied **as well** — belt and braces, since each defeats a different class of attack.
-
-## II-4. Why an OIDC resource server rather than our own auth?
-
-Cowork's connector UI takes an OAuth client ID/secret; it does not offer custom auth headers, which rules out the simpler API-key design. Building an authorization server means owning token issuance, refresh, revocation, and consent — a security-critical subsystem far from this project's competence. Validating a JWT against a configured issuer + JWKS is ~100 lines and delegates the hard parts to an IdP the operator already trusts. The `AUTH_MODE=open` escape hatch keeps local development friction-free while being loud enough that nobody ships it by accident.
-
-## II-5. Why skills instead of server-side generation?
-
-A `generate_slides` tool that runs the authoring prompts server-side would (a) spend the operator's LLM budget on the caller's work, (b) make the service an agent competing with a client that already has a better model and the user's actual context, and (c) reintroduce non-determinism into a service whose value proposition is determinism.
-
-Shipping the same prompts as **portable skills** keeps the proven flow while inverting who pays and who thinks. The service stays a pure function; the expertise still transfers.
-
-## II-6. Why SQLite for jobs and local disk for artifacts?
-
-v1 is a single host, so Redis and S3 would add operational surface for capacity that does not yet exist. Both sit behind interfaces (`JobStore`, `ArtifactStore`) so the swap is a backend implementation, not a refactor. This is a deliberate YAGNI call recorded so the eventual multi-node work knows exactly where to cut in.
+Issuing credentials means storing them, rotating them, and being responsible for their compromise — all of which contradict NFR-01. Validating someone else's tokens requires no stored secret beyond a cached public key.
 
 ---
 
@@ -194,248 +138,65 @@ v1 is a single host, so Redis and S3 would add operational surface for capacity 
 
 ## III-1. Overview
 
+Two containers. `paper-mcp` serves the MCP endpoint, owns the artifact store and job table, and makes **no outbound network calls**. `marker` performs extraction on the GPU, published on loopback only, reachable solely from `paper-mcp` over the compose network.
+
 ```
-   Claude Cowork / Desktop / Cursor / any MCP client
-                     │
-                     │  remote MCP (streamable HTTP)
-                     │  Authorization: Bearer <JWT>
-                     ▼
-┌──────────────────────────────────────────────────────────┐
-│  paper-mcp container                                     │
-│                                                          │
-│   FastAPI ── FastMCP (8 tools + prompts)                 │
-│      │                                                   │
-│      ├── auth.py      OIDC resource server (JWKS cache)  │
-│      ├── quota.py     token buckets per subject          │
-│      ├── jobs.py      SQLite job store + worker pool     │
-│      ├── artifacts.py content-addressed store + TTL      │
-│      │                                                   │
-│      └── tools/                                          │
-│           discovery.py  fetch.py  latex.py               │
-│                │           │         │                   │
-│                ▼           ▼         ▼                   │
-│          pipelines/ (ported)    sandbox/ (nsjail)        │
-└──────────────────────────────────────────────────────────┘
-        │                │                    │
-   arXiv · S2 ·      Marker (gpu          TeX Live
-   Unpaywall         profile, optional)
+agent client ──MCP/HTTP──> paper-mcp ──compose net──> marker (GPU, no egress)
+                              │
+                              └── artifact store (content-addressed, TTL)
 ```
 
 ## III-2. MCP surface
 
-Seven tools. Input/output models are Pydantic v2; JSON schemas are generated from them (NFR-04).
-
-```
-search_arxiv(query, max_results=8)                       → PaperRef[]
-search_papers(query, max_results=8)                      → PaperRef[]        # Semantic Scholar
-find_related(paper_id, mode, max_results=8)              → PaperRef[]
-resolve_paper(identifier)                                → PaperRef
-fetch_paper(paper_id | url)                              → Bundle | JobHandle
-get_job(job_id)                                          → JobStatus
-compile_latex(tex, assets=[], engine="auto")             → CompileOutput
-```
-
-**`PaperRef`** — one shape across all sources, so an agent never branches on provenance:
-
-```jsonc
-{
-  "paper_id": "arxiv:1706.03762",        // arxiv:<id> | ss:<paperId> | doi:<doi>
-  "title": "Attention Is All You Need",
-  "abstract": "…",                        // nullable
-  "year": 2017,                           // nullable
-  "authors": ["Ashish Vaswani", "…"],
-  "arxiv_id": "1706.03762",               // nullable
-  "doi": null,
-  "venue": "NeurIPS",                     // nullable
-  "citation_count": 123456,               // nullable
-  "open_access": { "available": true, "url": "https://…", "source": "arxiv" },
-  "source": "semantic_scholar"
-}
-```
-
-`paper_id` prefers `arxiv:` when an arXiv ID exists — it is the identifier with an ingestible source, so preferring it makes `fetch_paper` succeed more often.
+Two tools: `extract_pdf` (FR-01) and `get_job` (FR-02). Both declare their scope in their descriptions per NFR-05.
 
 ## III-3. The bundle
 
-Markdown and a figure index. That is the whole shape, because that is what an
-agent needs to process a paper precisely.
-
-```jsonc
-{
-  "bundle_id": "arxiv:1706.03762",
-  "paper": { /* PaperRef */ },
-  "markdown": "## Introduction
-
-The dominant sequence transduction models…
-
-| Model | BLEU |
-| --- | --- |
-| Base | 27.3 |
-
-$$
-\mathrm{Attention}(Q,K,V)=…
-$$",
-  "markdown_truncated": false,
-  "figures": [
-    { "id": "fig-001",
-      "caption": "The Transformer architecture.",
-      "page": 3,
-      "image_path": "figures/fig-001.png",
-      "image_url": "https://…/a/<token>/figures/fig-001.png" }
-  ],
-  "extraction": { "engine": "marker", "pages": 15, "warnings": [] },
-  "artifact": { "zip_url": "https://…/a/<token>/bundle.zip", "bytes": 4821004,
-                "expires_at": "2026-08-14T…Z" }
-}
+```
+{ document: {content_sha256, bytes, pages, title?, filename?},
+  markdown: str, markdown_truncated: bool,
+  figures: [{id, caption, page, image_path, image_url}],
+  extraction: {engine, pages, warnings[]},
+  artifact: {zip_url, bytes, expires_at} }
 ```
 
-**Faithfulness is the only quality that matters**, and it means three concrete
-things, each asserted by tests:
-
-* **Tables stay tables** — rows and columns intact, rendered from Marker's
-  HTML. A table flattened into a blob of cell text is worse than absent: it
-  invites an agent to read numbers against the wrong column. PaperHub hit this
-  exact bug and wrote `html_to_markdown` to fix it.
-* **Equations stay LaTeX** — never prose approximations of maths.
-* **Figures are extracted, indexed, and captioned** — an index entry exists
-  only when image bytes decoded and landed on disk, so citing `fig-001` always
-  refers to something real. A figure Marker could not extract produces a
-  warning, never an entry.
-
-**What is deliberately absent.** No section index, no equation index, no
-outline/full duality. Marker emits headings, so an agent navigates the
-markdown natively; it inlines equations as LaTeX, so a parallel index is a
-second copy to keep in sync. PaperHub needed those structures to drive a
-citation canvas over character offsets — a requirement this service does not
-have, and whose machinery it should not inherit.
-
-**Truncation is never silent.** Markdown is capped at 200k characters with an
-explicit `markdown_truncated` flag, and the full text always remains in the
-zip. A silent cap would let an agent conclude a paper omits something it
-discusses on page 30.
+`document` states only what was observed. Without an arXiv or Semantic Scholar lookup there is no verified bibliographic record, and the service must not assert one: an agent that cites a title the document does not carry has been misled by its tool. `title` is best-effort from the first heading Marker found and is explicitly derived; `filename` is a caller-supplied label, echoed rather than trusted. Callers needing authoritative metadata resolve it themselves, where the provenance is theirs.
 
 ## III-4. Artifact store
 
-Content-addressed, keyed by `arxiv:<id>` or `sha256:<hex>` of the source bytes:
-
-```
-$ARTIFACT_ROOT/<sha256(key)[:2]>/<sha256(key)>/
-    bundle.json          # the full bundle incl. all section markdown
-    bundle.zip           # figures/, source, rendered assets
-    figures/…
-    pdf/<sha256(tex)>.pdf
-```
-
-Served at `GET /a/<opaque>/…` where `<opaque>` is derived from the key — unguessable, so a privately uploaded manuscript is reachable only by someone who already possesses the file (and could compute its hash anyway). Every response carries an expiry; a sweeper reclaims entries past TTL by last-access time.
-
-Two callers requesting the same public paper share one entry. That is deduplication of public data, not a leak — and it is what makes the cache-hit path fast enough for NFR-03.
-
-**No absolute URL is ever persisted.** The token and the path inside an entry are content; the origin is deployment state. `bundle.json` stores neither `image_url` nor `zip_url`, and both are materialized from the current `PUBLIC_BASE_URL` on every serve — build and cache hit alike. Storing them was a real defect: the cache outlives the deployment (a named volume, deliberately), so an instance restarted on a different origin replayed the old one verbatim and handed agents figure links that no longer resolved, while the files sat intact on disk. Nothing in the bundle looked wrong (v0.4).
-
-Behind an `ArtifactStore` interface (`put`, `url_for`, `open`, `expire`) so S3 can be added later (§II-6).
+Content-addressed by `sha256` of the input bytes, sharded two levels. Each entry holds `bundle.json`, `markdown.md`, `figures/`, and `bundle.zip`. Served at `GET /a/<token>/<path>` with traversal made impossible by construction rather than detected. URLs are materialized at serve time from the current public base URL and never persisted (v0.4).
 
 ## III-5. Job model
 
-```
-fetch_paper → cached?          → Bundle (sync)
-            → arXiv LaTeX?     → Bundle (sync, ≤30 s)
-            → PDF extraction   → JobHandle {job_id, state:"queued", poll_after_ms}
-```
+An ephemeral table keyed by unguessable id, holding state, progress, and a content key. Jobs deduplicate on the content key so concurrent identical uploads join one extraction. Records carry no identity beyond the quota subject and expire on a TTL.
 
-`jobs` (SQLite, ephemeral): `job_id` (unguessable), `kind`, `content_key`, `state`, `subject_hash`, `progress`, `result_key`, `error`, `created_at`, `expires_at`.
+## III-6. Containment
 
-**Coalescing:** a job is keyed by `content_key`, so concurrent requests for the same uncached paper join one job rather than starting N GPU extractions. **GPU serialization:** Marker work runs through a single-slot semaphore (PaperHub measured one dense two-column page saturating ~6 GB VRAM; concurrency there means OOM, not throughput). `subject_hash` exists only for quota accounting and is a salted hash, not an identity record.
-
-## III-6. The sandbox
-
-Every `compile_latex` invocation runs in a fresh nsjail:
-
-| Layer | Control |
-| --- | --- |
-| Network | none — no interfaces in the namespace |
-| Filesystem | read-only rootfs; tmpfs work dir; only the TeX tree and the job's inputs bind-mounted read-only |
-| Identity | unprivileged uid/gid, no new privileges, dropped capabilities |
-| Resources | rlimits on cpu, address space, file size, pids; wall-clock kill; output byte cap |
-| TeX flags | `-no-shell-escape`, `-interaction=nonstopmode`, `openin_any=p`, `openout_any=p`, `max_print_line` bounded |
-| Result | only the PDF and the log leave the jail, both size-capped |
-
-Failure modes are typed: `compile_error` (TeX rejected it), `timeout`, `resource_limit`, `sandbox_violation`. All four are normal outcomes returned to the caller — never a 500, never a partial write.
-
-The adversarial corpus in §I-8 #4 is a release gate. A change to the sandbox that has not been re-run against it does not ship.
+Marker is the boundary (NFR-02): loopback-published, no egress, non-root, read-only root with tmpfs scratch, `cap-drop ALL`, memory-limited. `paper-mcp` itself needs no elevated privileges — with LaTeX removed, `seccomp=unconfined` is gone and the default profile applies.
 
 ## III-7. Auth and quota
 
-```
-Bearer JWT → verify signature (JWKS, cached, key-rotation aware)
-           → verify iss, aud, exp, nbf
-           → subject = sub
-           → subject_hash = HMAC(salt, sub)     # what we log and meter
-```
+Bearer JWT validated against issuer, audience, expiry, and signature, with uniform rejection bodies so failures are not an oracle. DNS-rebinding protection via an allowed-hosts list. Per-subject token buckets (FR-06); GPU work globally serialized.
 
-No claim beyond `sub` is used for authorization, because there is nothing to authorize *against* — every caller can reach every tool. Quota buckets are keyed on `subject_hash`, held in memory with periodic persistence (a restart forgiving one window is acceptable; the alternative is a Redis dependency for no real gain).
+## III-8. Deployment
 
-`AUTH_MODE=open` disables verification for local development, falls back to per-IP buckets, and emits a startup banner plus a warning on every call.
+One compose file, two services, two named volumes (artifacts, Marker weights). The Marker image must carry a C toolchain (`gcc` + `libc6-dev`) for Triton's runtime JIT (NFR-07), and pins its Gemini model explicitly — marker-pdf's own default has been retired once already, and the failure was silent: every call answered 404 while the service reported healthy.
 
-## III-8. Skills
+## III-9. Testing
 
-```
-skills/paper-to-deck/SKILL.md      # narrative planning → draft → coherence → figure check
-skills/deep-read/SKILL.md          # outline-first navigation, targeted section reads
-skills/figure-grounding/SKILL.md   # cite only manifest figures; verification step
-```
+Unit tests are fast and offline, with Marker and the network faked. Two layers run against the **running container** and are release gates: an adversarial matrix (auth, traversal, quota, malicious PDFs) and its converse — the product driven through a real MCP client with the guards armed, because a service that rejects everyone is trivially secure and useless. Neither may use an in-process test client, which follows redirects and hides transport defects. A check must prove the **installed** artifact carries the controls it attacks; an early run reported a bypass that existed only in a stale image.
 
-Each is also registered as an MCP prompt so Claude clients expose it as a slash command. Skills reference tools by name and describe the *flow*; they contain no service-specific secrets and remain useful if copied into a client's own skill directory.
+Fidelity is verified against source documents, not fixtures alone: extracted values are compared to the PDFs read directly, and agreement between two papers reporting the same number is treated as evidence.
 
-Authoring discipline (mandatory): clear directive first line, concise, XML-delimited injected context, multi-shot examples for ambiguous corners, and adoption only after a ≥2-variant × query-set × judged comparison. The PaperHub prompts are the **starting point**, not the deliverable — they were written for server-side execution against a known state and must be rewritten for a client agent holding different context.
+## III-10. Provenance contract
 
-## III-9. Deployment
+Every file copied from PaperHub carries:
 
 ```
-docker/
-  Dockerfile              # service + TeX Live + PyMuPDF + pandoc + nsjail
-  docker-compose.yml      # profile: default (CPU)
-  docker-compose.gpu.yml  # profile: gpu → adds marker service
-```
-
-Configuration is environment-only (twelve-factor): `OIDC_ISSUER`, `OIDC_AUDIENCE`, `AUTH_MODE`, `ARTIFACT_ROOT`, `ARTIFACT_TTL_HOURS`, `QUOTA_*`, `MARKER_URL`, `MARKER_MAX_PAGES`, `S2_API_KEY`, `UNPAYWALL_EMAIL`, `PUBLIC_BASE_URL`, `LOG_LEVEL`.
-
-**Marker is required, and PDF ingestion is asynchronous because of it.** PaperHub measured Marker at 21 minutes for a 5-page batch of dense two-column pages — VRAM scales with content density, not page count, and a single dense page can produce 200+ Surya OCR lines that saturate 6 GB. That is why `fetch_paper` on a PDF returns a job handle rather than blocking (FR-06), and why Marker work is globally serialized (FR-09): concurrency there means OOM, not throughput.
-
-**Marker is published on loopback only.** Its dependency tree carries advisories that cannot be patched: `marker-pdf` pins `pillow<11` at every released version including 2.0.0, while the current image-decode advisories are fixed in 12.3.0. Upgrading is not available, so the control is who may feed the decoder. A bare `8002:8002` binds every interface — on Linux publishing through the host firewall — which would let anyone routing to the host POST an arbitrary PDF into it, bypassing auth, quota, and the arXiv-only restriction. Bound to `127.0.0.1`, the only remote path in is `fetch_paper` → an arXiv PDF, behind a bearer token and an extraction budget. `paper-mcp` reaches Marker over the compose network regardless (v0.4).
-
-There is no low-fidelity fallback engine. A GPU-less host still serves discovery, arXiv-source papers, and LaTeX compilation; a PDF fetch returns `extraction_unavailable` naming the missing dependency. Refusing is the correct behaviour — PaperHub shipped crude PyMuPDF extraction once and had to reverse it after the output proved unusable (§I-1), and a service whose value proposition is *faithful* extraction should not quietly substitute unfaithful extraction.
-
-*(PyMuPDF remains a dependency for one unrelated job: rasterizing vector **figure files** — `.pdf`/`.eps` referenced by `\includegraphics` — into PNGs for the figure manifest. That is image-format conversion of a single already-identified figure, not document understanding, and Marker does not perform it. PaperHub uses PyMuPDF the same way in its LaTeX path today.)*
-
-## III-10. Testing
-
-| Layer | Approach |
-| --- | --- |
-| Unit | Pure functions on fixtures — parsers, `PaperRef` normalization, log-error extraction, key derivation |
-| Contract | Every tool's JSON schema snapshot-tested; a breaking change must be deliberate |
-| **On-device acceptance** | `scripts/on_device_check.py` boots the real entry point and drives it with a real MCP client over the wire, covering every tool and every externally-dependent branch. **This layer is load-bearing, not a formality** — mocked tests are blind to upstream contracts by construction, and this one has already caught four defects the unit suite passed clean: a `307` redirect on `POST /mcp` (the in-process test client follows redirects), a field name one Semantic Scholar endpoint accepts and another rejects, a `similar` mode pointed at an endpoint that does not exist, and a synchronous arXiv client blocking the event loop (three concurrent calls: 20.5 s → 0.7 s once dispatched to a thread). A throttled upstream must report **skip**, never pass — a check that cannot reach its branch has not verified it |
-| Extraction parity | The 10-paper fixture corpus vs. PaperHub's cached `PaperAsset` output (acceptance #3) |
-| Sandbox adversarial | The escape corpus (acceptance #4) — **release gate** |
-| **Security** | An attack matrix against the **running container** and a real IdP — never a test client, because `TestClient` follows redirects and that is precisely how a `307` on `POST /mcp` passed the suite. Covers token forgery (`alg=none`, RS256→HS256 confusion), audience/issuer/expiry/signature rejection, uniform rejection bodies, `Host` rebinding, six traversal encodings, quota with `Retry-After`, and sandbox probes through the real tool. It must rebuild the image and assert the **installed** package carries the controls under test — an early run reported a total auth bypass that existed only in a stale image, and a security result is only as current as the artifact it attacked. **Release gate** |
-| **Authenticated product** | The converse: a service that rejects everyone is trivially secure and useless. All seven tools driven through a real MCP client bearing a real token, resolve → extraction → compiled deck, asserting no session identifier is ever issued (stateless: no handle to leak, every request carries its own credential). A throttled upstream reports **skip** |
-| Integration | An MCP client against the running container: list tools, run the full UC-3 loop |
-| Load | Concurrent extraction + compile under quota, asserting GPU serialization and no starvation |
-
-External APIs are mocked in unit/contract tests; a separately-marked suite exercises them live.
-
-## III-11. Provenance contract
-
-Files ported from PaperHub carry:
-
-```python
 # Ported from PaperHub `backend/src/paperhub/pipelines/<file>.py` @ <commit>.
 # Adapted: <what changed and why>.
 ```
 
-Expected adaptations: removing `aiosqlite`/session parameters, replacing tracer steps with structured logs, replacing workspace paths with the artifact store, and dropping LLM-dependent code paths (which become skills).
+## III-11. Closing principle
 
----
-
-## III-12. Closing principle
-
-**The service is a pure function; the intelligence is portable text.** Every design decision here follows from that sentence — statelessness, no server-side inference, content-addressing, skills as a deliverable, and identity that means nothing more than a quota key. When a future change makes one of those uncomfortable, re-read this line before amending the requirement.
+The service supplies data an agent can compute on. Its single obligation is that the data be faithful — and where faithfulness fails, that the failure be loud. A wrong number that looks right is the only outcome worth blocking a release over.
