@@ -72,7 +72,7 @@ identity degrades to a quota key.
 | --- | --- | --- |
 | `search_arxiv` · `search_papers` · `find_related` · `resolve_paper` | A | ✅ shipped |
 | `fetch_paper` · `get_job` + artifact serving | B | ✅ shipped — verified against real Marker |
-| `compile_latex` (sandboxed, a tool — not a flow) | C | planned |
+| `compile_latex` (sandboxed, a tool — not a flow) | C | ✅ shipped — jail verified in-container |
 | OIDC auth + quota | D | planned |
 | Portable skills (examples, not the product) | E | planned |
 
@@ -88,6 +88,33 @@ uv run mypy src
 docker compose up -d marker      # required for extraction
 uv run paper-mcp
 ```
+
+### Compiling LaTeX
+
+`compile_latex` executes caller-supplied source, so it runs behind three
+layers: TeX flags (`-no-shell-escape`, `openin_any=p`, `openout_any=p`),
+**nsjail**, and wall-clock/output caps. One attempt, structured errors with
+file and line, no revise loop — the calling agent fixes and resubmits.
+
+**Without a sandbox it refuses.** nsjail is Linux-only, so on a host lacking
+it the tool returns `sandbox_unavailable` unless `PAPER_MCP_AUTH_MODE=open`.
+Declining costs a caller one retry; running a stranger's program unisolated
+costs the host.
+
+The container needs `seccomp=unconfined` (already in `docker-compose.yml`):
+Docker's default profile blocks the namespace `clone()` nsjail requires, and
+without it every compile fails to launch. Measured — `SYS_ADMIN` and
+`--privileged` are *not* needed, which keeps the exemption narrow.
+
+```bash
+# the release gate: adversarial corpus inside the jail
+docker run --rm --security-opt seccomp=unconfined   -v "$PWD/scripts:/app/scripts:ro" paper-mcp   python /app/scripts/sandbox_corpus.py
+```
+
+Ten cases locally and nine in-jail, each failing closed: shell escape does not
+execute, absolute-path and traversal reads are refused, writes outside the job
+directory are refused, unbounded expansion is killed, no network is reachable
+from inside the jail — and a benign document still compiles.
 
 ### The check that decides whether this works
 
