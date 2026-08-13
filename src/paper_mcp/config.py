@@ -27,6 +27,11 @@ class Settings:
     marker_max_pages: int
     artifact_root: Path
     artifact_ttl_hours: float
+    oidc_issuer: str | None
+    oidc_audience: str | None
+    quota_calls_per_minute: float
+    quota_extractions_per_hour: float
+    quota_compile_seconds_per_hour: float
 
 
 def _csv(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -62,4 +67,15 @@ def settings() -> Settings:
         marker_max_pages=int(os.environ.get("PAPER_MCP_MARKER_MAX_PAGES", "1")),
         artifact_root=Path(os.environ.get("PAPER_MCP_ARTIFACT_ROOT", "artifacts")),
         artifact_ttl_hours=float(os.environ.get("PAPER_MCP_ARTIFACT_TTL_HOURS", "24")),
+        # This service is a resource server: it validates tokens against an
+        # IdP the operator brings, and never issues them.
+        oidc_issuer=os.environ.get("PAPER_MCP_OIDC_ISSUER") or None,
+        oidc_audience=os.environ.get("PAPER_MCP_OIDC_AUDIENCE") or None,
+        quota_calls_per_minute=float(os.environ.get("PAPER_MCP_QUOTA_CALLS_PER_MINUTE", "60")),
+        quota_extractions_per_hour=float(
+            os.environ.get("PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR", "20")
+        ),
+        quota_compile_seconds_per_hour=float(
+            os.environ.get("PAPER_MCP_QUOTA_COMPILE_SECONDS_PER_HOUR", "600")
+        ),
     )

@@ -926,6 +926,7 @@ dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pymupdf" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -947,6 +948,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.2" },
     { name = "pydantic", specifier = ">=2.9" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.9" },
     { name = "pymupdf", specifier = ">=1.28.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]

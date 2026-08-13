@@ -12,6 +12,7 @@ dependencies = [
     "arxiv>=2.1",
     "pydantic>=2.9",
     "pymupdf>=1.28.2",
+    "pyjwt[crypto]>=2.9",
 ]
 
 [project.scripts]

@@ -24,6 +24,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from paper_mcp import __version__
 from paper_mcp.api.artifacts import router as artifacts_router
+from paper_mcp.api.middleware import AuthQuotaMiddleware
 from paper_mcp.config import Settings, settings
 from paper_mcp.tools.compile import tool_compile_latex
 from paper_mcp.tools.discovery import (
@@ -136,6 +137,12 @@ def transport_security(cfg: Settings) -> TransportSecuritySettings:
     only. A literal `*` disables the check — an explicit operator choice,
     warned about at boot, never a silent default.
     """
+    if cfg.auth_mode != "open" and not (cfg.oidc_issuer and cfg.oidc_audience):
+        _LOG.error(
+            "AUTH_MODE=%s but PAPER_MCP_OIDC_ISSUER/AUDIENCE are unset — every "
+            "request will be rejected. Configure the IdP or set AUTH_MODE=open.",
+            cfg.auth_mode,
+        )
     if "*" in cfg.allowed_hosts:
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     origins = list(cfg.allowed_origins) or [
@@ -193,6 +200,8 @@ def create_app() -> FastAPI:
             "marker": "up" if await marker_client().healthy() else "down",
         }
 
+    # Authenticate and meter before anything reaches a tool.
+    app.add_middleware(AuthQuotaMiddleware)
     app.include_router(artifacts_router)
     app.mount("", mcp_app)
     return app
@@ -238,6 +247,12 @@ def main() -> None:
         _LOG.warning(
             "AUTH_MODE=open — every caller is unauthenticated. "
             "Do not run this on a public network.",
+        )
+    if cfg.auth_mode != "open" and not (cfg.oidc_issuer and cfg.oidc_audience):
+        _LOG.error(
+            "AUTH_MODE=%s but PAPER_MCP_OIDC_ISSUER/AUDIENCE are unset — every "
+            "request will be rejected. Configure the IdP or set AUTH_MODE=open.",
+            cfg.auth_mode,
         )
     if "*" in cfg.allowed_hosts:
         _LOG.warning(
