@@ -26,6 +26,7 @@ from paper_mcp import __version__
 from paper_mcp.api.artifacts import router as artifacts_router
 from paper_mcp.api.middleware import AuthQuotaMiddleware
 from paper_mcp.config import Settings, settings
+from paper_mcp.skills import load_skills
 from paper_mcp.tools.compile import tool_compile_latex
 from paper_mcp.tools.discovery import (
     tool_find_related,
@@ -114,6 +115,7 @@ def build_mcp_server() -> MCPServer[Any]:
             "only to a temporary job directory."
         ),
     )
+    _register_skills(server)
     server.add_tool(
         tool_resolve_paper,
         name="resolve_paper",
@@ -126,6 +128,23 @@ def build_mcp_server() -> MCPServer[Any]:
         ),
     )
     return server
+
+
+def _register_skills(server: MCPServer[Any]) -> None:
+    """Serve each skill bundle as an MCP prompt.
+
+    Bound eagerly per skill: a late-binding closure over the loop variable
+    would give every prompt the last skill's text.
+    """
+    for name, (description, body) in load_skills().items():
+
+        def make(text: str = body):  # type: ignore[no-untyped-def]
+            def render() -> str:
+                return text
+
+            return render
+
+        server.prompt(name=name, description=description or None)(make())
 
 
 def transport_security(cfg: Settings) -> TransportSecuritySettings:

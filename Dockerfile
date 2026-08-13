@@ -54,6 +54,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+# Skills are served as MCP prompts, so they ship with the image.
+COPY skills ./skills
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system .
 
