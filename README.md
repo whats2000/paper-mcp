@@ -13,7 +13,7 @@ The full text as markdown · every figure indexed with its caption · a sandboxe
 ![Auth](https://img.shields.io/badge/auth-OIDC%20resource%20server-2A6DB2)
 ![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
 ![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
-![Tests](https://img.shields.io/badge/tests-189%20unit%20%2B%207%20integration-brightgreen)
+![Tests](https://img.shields.io/badge/tests-199%20unit%20%2B%207%20integration-brightgreen)
 
 </div>
 
@@ -206,6 +206,7 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_S2_API_KEY` | unset | **Effectively required in production** — see below |
 | `PAPER_MCP_MARKER_URL` | `http://127.0.0.1:8002` | Marker service. **Required for extraction** — without it `fetch_paper` reports the dependency rather than degrading |
 | `PAPER_MCP_MARKER_MAX_PAGES` | `1` | Pages per Marker call. VRAM scales with page *content density*, not page count: one dense two-column page can saturate 6 GB, and a 5-page batch was measured at 21 minutes. Raise only on a bigger GPU |
+| `MARKER_GEMINI_MODEL` | `gemini-2.5-flash` | *(on the Marker service)* Model backing Marker's `use_llm` accuracy pass. marker-pdf carries its own default and Google has already retired it once — every call answered 404 while Marker returned `200`, so the pass stopped running with nothing to show for it. Pin it here when Google moves again |
 | `PAPER_MCP_PUBLIC_BASE_URL` | `http://localhost:8000` | Origin the artifact URLs are built from. Nothing is persisted with it — URLs are derived on every serve, so moving hosts does not strand a warm cache |
 | `PAPER_MCP_ARTIFACT_ROOT` | `artifacts` | Content-addressed cache for bundles and figure images |
 | `PAPER_MCP_ARTIFACT_TTL_HOURS` | `24` | How long artifacts survive before the sweeper reclaims them |
@@ -244,7 +245,7 @@ They are **examples, not the product.** The calling agent owns its pipelines and
 
 ```bash
 uv sync
-uv run pytest                    # 189 tests, fast and offline (integration excluded)
+uv run pytest                    # 199 tests, fast and offline (integration excluded)
 uv run pytest -m integration     # spawns a real server, drives it with a real MCP client
 uv run ruff check src tests
 uv run mypy src                  # --strict
