@@ -11,6 +11,7 @@ import re
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from paper_mcp.artifacts import ArtifactStore, content_key
 from paper_mcp.bundle import ArtifactRef, Bundle, DocumentRef, ExtractionInfo, cap_markdown
@@ -35,6 +36,23 @@ def bundle_key(pdf: bytes) -> str:
     upload free without the service knowing anything about either caller.
     """
     return content_key(data=pdf)
+
+
+async def _profile(marker: MarkerClient) -> dict[str, Any]:
+    """Marker's configuration, tolerating a client that cannot report it."""
+    getter = getattr(marker, "profile", None)
+    if getter is None:
+        return {}
+    result = await getter()
+    return result if isinstance(result, dict) else {}
+
+
+def _llm_model(profile: dict[str, Any]) -> str | None:
+    """The model backing the accuracy pass, or None when it ran without one."""
+    if not profile.get("use_llm"):
+        return None
+    model = profile.get("llm_model")
+    return model if isinstance(model, str) and model else None
 
 
 def derived_title(markdown: str) -> str | None:
@@ -147,7 +165,12 @@ async def build_bundle(
         markdown=inline,
         markdown_truncated=truncated,
         figures=figures,
-        extraction=ExtractionInfo(engine="marker", pages=pages, warnings=warnings),
+        extraction=ExtractionInfo(
+            engine="marker",
+            pages=pages,
+            warnings=warnings,
+            llm_model=_llm_model(await _profile(marker)),
+        ),
         artifact=ArtifactRef(
             bytes=zip_bytes,
             expires_at=(datetime.now(UTC) + timedelta(hours=ttl_hours)).isoformat(),

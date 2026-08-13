@@ -53,6 +53,14 @@ class ExtractionInfo(BaseModel):
     engine: ExtractionEngine = "marker"
     pages: int = 0
     warnings: list[str] = Field(default_factory=list)
+    # Which model backed Marker's accuracy pass, or None when it ran without
+    # one. Recorded because whether that pass ran is a property of the
+    # deployment, and the artifact cache outlives a deployment: an operator
+    # who adds a key keeps serving every already-cached paper from its
+    # pre-key extraction, where LLMTableProcessor never ran and tables are
+    # measurably worse. The bundle looks complete either way, so naming the
+    # model is what makes a stale entry visible rather than merely wrong.
+    llm_model: str | None = None
 
 
 class ArtifactRef(BaseModel):

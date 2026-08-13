@@ -137,6 +137,26 @@ class MarkerClient:
             merged.extend((await self._post(pdf_bytes, indices)).blocks)
         return MarkerDoc(blocks=merged)
 
+    async def profile(self) -> dict[str, Any]:
+        """Marker's current extraction configuration, or `{}` if unreachable.
+
+        Read once per extraction, not per cache lookup: it exists to stamp a
+        bundle with what produced it, and a bundle is produced once.
+        """
+        client = self._client or httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+        try:
+            resp = await client.get(f"{self._base_url}/health")
+            resp.raise_for_status()
+            body = resp.json()
+        except (httpx.HTTPError, ValueError):
+            # Never fatal: a missing stamp is a lesser loss than a failed
+            # extraction the caller waited GPU-minutes for.
+            return {}
+        finally:
+            if self._client is None:
+                await client.aclose()
+        return body if isinstance(body, dict) else {}
+
     async def healthy(self) -> bool:
         """Whether Marker is reachable, for `/health` and pre-flight checks."""
         client = self._client or httpx.AsyncClient(timeout=httpx.Timeout(5.0))

@@ -201,3 +201,35 @@ def test_a_corrupt_cache_entry_reads_as_a_miss(tmp_path: Path) -> None:
     (entry / "bundle.json").write_text("{not json", encoding="utf-8")
 
     assert load_cached("arxiv:1", store=store) is None
+
+
+async def test_the_bundle_records_which_model_extracted_it(
+    tmp_path: Path, _no_network: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whether Marker's accuracy pass ran is a property of the deployment.
+
+    The cache outlives a config change: an operator who adds GEMINI_API_KEY
+    keeps serving every already-cached paper from its pre-key extraction,
+    where LLMTableProcessor never ran and tables are measurably worse. The
+    bundle looks complete either way, so the only defence is recording what
+    produced it.
+    """
+    class _MarkerWithLlm(_FakeMarker):
+        async def profile(self) -> dict[str, object]:
+            return {"use_llm": True, "llm_model": "gemini-2.5-flash"}
+
+    store = ArtifactStore(tmp_path)
+
+    bundle = await build_bundle(_PDF, store=store, marker=_MarkerWithLlm(_doc()))  # type: ignore[arg-type]
+
+    assert bundle.extraction.llm_model == "gemini-2.5-flash"
+
+
+async def test_a_keyless_extraction_records_no_model(
+    tmp_path: Path, _no_network: None
+) -> None:
+    store = ArtifactStore(tmp_path)
+
+    bundle = await build_bundle(_PDF, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
+
+    assert bundle.extraction.llm_model is None
