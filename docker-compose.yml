@@ -40,7 +40,21 @@ services:
   marker:
     build: ./marker_service
     image: paper-mcp-marker
-    ports: ["8002:8002"]
+    # Loopback only — NOT 0.0.0.0. Marker hands whatever bytes it is given to
+    # pillow, and `marker-pdf` pins `pillow<11` at every released version
+    # (2.0.0 included) while the current decode advisories are fixed in
+    # 12.3.0. Those CVEs therefore cannot be patched here, so the control that
+    # remains is who gets to feed the decoder.
+    #
+    # A bare `8002:8002` binds every interface — and on Linux publishes
+    # straight through the host firewall — letting anyone who can route to the
+    # host POST an arbitrary PDF into the decoder, bypassing paper-mcp's auth,
+    # its quota, and its arXiv-only restriction. On loopback, the only remote
+    # path in is `fetch_paper` -> an arXiv PDF, behind a bearer token and an
+    # extraction budget. paper-mcp itself reaches Marker over the compose
+    # network (`http://marker:8002`), which this does not affect; the
+    # published port exists for the from-source dev flow.
+    ports: ["127.0.0.1:8002:8002"]
     environment:
       # Marker's use_llm accuracy pass materially improves tables, math and
       # layout. It is an internal quality knob on a deterministic pipeline —
