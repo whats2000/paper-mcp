@@ -70,13 +70,16 @@ def main() -> int:
         )
         check(not marker.exists(), "shell escape does not execute")
 
-        secret = root / "secret.tex"
-        secret.write_text("LEAKED-SECRET", encoding="utf-8")
+        # A canary, not a secret: it exists to be unreadable. Naming it
+        # otherwise made a scanner read this decoy as real credential
+        # material flowing into the compiler.
+        canary = root / "canary.tex"
+        canary.write_text("OUT-OF-JAIL-CANARY", encoding="utf-8")
         _p, result = compile_in_jail(
-            _DOC % rf"\input{{{secret.as_posix()}}}", root / "absread"
+            _DOC % rf"\input{{{canary.as_posix()}}}", root / "absread"
         )
-        leaked = "LEAKED-SECRET" in (result.pdf or b"").decode("latin-1", "ignore")
-        check(not leaked, "an absolute-path read is refused")
+        escaped_read = "OUT-OF-JAIL-CANARY" in (result.pdf or b"").decode("latin-1", "ignore")
+        check(not escaped_read, "an absolute-path read is refused")
 
         outside = root / "outside.tex"
         outside.write_text("OUTSIDE-CONTENT", encoding="utf-8")
