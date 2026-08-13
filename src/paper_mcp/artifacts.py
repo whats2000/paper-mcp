@@ -74,7 +74,32 @@ class ArtifactStore:
         return self.dir_for_token(token_for(key))
 
     def dir_for_token(self, token: str) -> Path:
+        """Where `token`'s entry lives. For tokens this process derived.
+
+        Never call this with a token off the network — use `entry_for_token`,
+        which looks the directory up instead of naming it.
+        """
         return self.root / token[:2] / token
+
+    def entry_for_token(self, token: str) -> Path | None:
+        """Find the entry a caller-supplied token names, or None.
+
+        The token is a lookup key, never a path component: shard and entry are
+        found by comparing against the names the filesystem reports, so the
+        `Path` returned is one this process built from `iterdir`. The cost is
+        two directory reads — the root holds at most 256 shards, and an entry
+        name is a sha256 digest, so a shard holds a small fraction of the
+        store.
+        """
+        if not _TOKEN_RE.fullmatch(token) or not self.root.is_dir():
+            return None
+        for shard in self.root.iterdir():
+            if shard.name != token[:2] or not shard.is_dir():
+                continue
+            for entry in shard.iterdir():
+                if entry.name == token and entry.is_dir():
+                    return entry
+        return None
 
     def ensure(self, key: str) -> Path:
         entry = self.dir_for(key)
@@ -88,21 +113,19 @@ class ArtifactStore:
         security boundary rather than input tidying — and it is built so that
         traversal cannot happen rather than so that traversal is detected.
 
-        `rel` is never joined onto a directory. The entry is enumerated and
-        `rel` is matched against the paths it actually publishes, so the `Path`
-        returned was constructed by this process from the filesystem. No
-        spelling of the input — encoded, double-encoded, backslashed,
-        absolute, or `..`-laden — can name a file the entry does not hold,
-        because the input is a lookup key and never a path component.
+        **Neither half is ever joined onto a path.** Both are lookup keys:
+        the entry is found by `entry_for_token`, and `rel` is matched against
+        the paths that entry actually publishes. Every `Path` here was built
+        by this process from the filesystem, so no spelling of the input —
+        encoded, double-encoded, backslashed, absolute, or `..`-laden — can
+        name a file the store does not hold.
 
         A symlink pointing out of the entry is excluded too: the entry holds
         only files this service wrote, so anything resolving elsewhere is not
         part of the bundle regardless of how it got there.
         """
-        if not _TOKEN_RE.fullmatch(token):
-            raise InvalidArgumentError("unknown or expired artifact token")
-        entry = self.dir_for_token(token)
-        if not entry.is_dir():
+        entry = self.entry_for_token(token)
+        if entry is None:
             raise InvalidArgumentError("unknown or expired artifact token")
 
         wanted = rel.strip()

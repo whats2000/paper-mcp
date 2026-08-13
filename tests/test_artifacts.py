@@ -82,6 +82,15 @@ def test_resolve_rejects_an_unknown_token(tmp_path: Path) -> None:
         store.resolve("not-a-real-token", "bundle.json")
 
 
+def test_resolve_survives_a_store_that_has_never_been_written(tmp_path: Path) -> None:
+    # Looking an entry up reads directories, so a cold store must answer
+    # "unknown token" rather than raising FileNotFoundError at the caller.
+    store = ArtifactStore(tmp_path / "not-created-yet")
+
+    with pytest.raises(InvalidArgumentError):
+        store.resolve(token_for("arxiv:1"), "bundle.json")
+
+
 def test_resolve_refuses_a_token_that_is_not_a_sha256_digest(tmp_path: Path) -> None:
     # A directory really exists under this name, and it is still refused: a
     # token is a sha256 hexdigest or it is nothing. `str.isalnum()` would have
