@@ -261,6 +261,105 @@ def test_a_table_caption_is_still_kept(tmp_path: Path) -> None:
     assert "Table 1: Maximum path lengths." in markdown
 
 
+def test_a_table_that_drops_cells_is_reported_not_silently_truncated(
+    tmp_path: Path,
+) -> None:
+    """Suppressing TableCells must not hide data the render lost.
+
+    Measured on arXiv:1706.03762 Table 2: Marker collapsed a five-column
+    table with a two-row spanning header down to three columns, so every
+    training-cost figure (1.0 · 10^20 …) vanished from the rendered table.
+    Those values used to survive in the duplicate cell blob; once the blob is
+    suppressed they exist nowhere, and the caller cannot tell a column is
+    missing — "27.3 | 38.1" reads as complete.
+
+    The cells arrive as their own blocks, so the count is knowable. Losing
+    data silently is the one outcome this module must never produce.
+    """
+    doc = _doc(
+        # renders only 4 of the 6 cells Marker actually found
+        MarkerBlock(
+            block_type="Table",
+            html=(
+                "<table><tbody><tr><th>Model</th><th>BLEU</th></tr>"
+                "<tr><td>Base</td><td>27.3</td></tr></tbody></table>"
+            ),
+        ),
+        MarkerBlock(block_type="TableCell", html="<th>Model</th>"),
+        MarkerBlock(block_type="TableCell", html="<th>BLEU</th>"),
+        MarkerBlock(block_type="TableCell", html="<th>Cost</th>"),
+        MarkerBlock(block_type="TableCell", html="<td>Base</td>"),
+        MarkerBlock(block_type="TableCell", html="<td>27.3</td>"),
+        MarkerBlock(block_type="TableCell", html="<td>3.3e18</td>"),
+    )
+
+    markdown, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert "| Base | 27.3 |" in markdown, "the table must still render"
+    assert warnings, "dropped cells must be reported"
+    joined = " ".join(warnings).lower()
+    assert "cell" in joined
+    assert "6" in joined and "4" in joined, f"counts should be named: {warnings}"
+
+
+def test_dropped_cells_are_reported_even_when_a_block_interrupts(
+    tmp_path: Path,
+) -> None:
+    """Cells do not always follow their Table immediately.
+
+    Real order on arXiv:1706.03762 page 7 (Table 2):
+
+        TableGroup -> Caption -> Table -> Reference -> TableCell x55
+
+    A `Reference` sits between the table and its cells. Accounting that
+    closes on the first non-TableCell block therefore counts zero cells and
+    stays silent — which is exactly how Table 2's missing training-cost
+    column went unreported.
+    """
+    doc = _doc(
+        MarkerBlock(
+            block_type="Table",
+            html=(
+                "<table><tbody><tr><th>Model</th><th>BLEU</th></tr>"
+                "<tr><td>Base</td><td>27.3</td></tr></tbody></table>"
+            ),
+        ),
+        MarkerBlock(block_type="Reference", html="<span id='ref'></span>"),
+        MarkerBlock(block_type="TableCell", html="<th>Model</th>"),
+        MarkerBlock(block_type="TableCell", html="<th>BLEU</th>"),
+        MarkerBlock(block_type="TableCell", html="<th>Cost</th>"),
+        MarkerBlock(block_type="TableCell", html="<td>Base</td>"),
+        MarkerBlock(block_type="TableCell", html="<td>27.3</td>"),
+        MarkerBlock(block_type="TableCell", html="<td>3.3e18</td>"),
+    )
+
+    _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert warnings, "an interrupting block must not silence the accounting"
+    assert "6" in " ".join(warnings) and "4" in " ".join(warnings)
+
+
+def test_double_encoded_equation_entities_are_fully_resolved(tmp_path: Path) -> None:
+    """`&amp;amp;` needs unescaping twice, and one pass leaves `&amp;`.
+
+    Seen on arXiv:1706.03762: the MultiHead equation reached the agent as
+    `\\text{MultiHead}(Q, K, V) &amp;= \\text{Concat}(...)` inside `$$…$$`,
+    so the alignment operator of one of the paper's central equations was a
+    literal HTML entity.
+    """
+    doc = _doc(
+        MarkerBlock(
+            block_type="Equation",
+            latex=r"\begin{aligned} a &amp;amp;= b \end{aligned}",
+        )
+    )
+
+    markdown, _f, _w = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert r"a &= b" in markdown
+    assert "&amp;" not in markdown
+
+
 def test_figures_are_numbered_in_document_order(tmp_path: Path) -> None:
     doc = _doc(
         MarkerBlock(block_type="Figure", images={"a": _PNG}, caption="A"),

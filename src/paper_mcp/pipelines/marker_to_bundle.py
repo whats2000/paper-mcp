@@ -35,6 +35,10 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t]+")
 _BLANKS_RE = re.compile(r"\n{3,}")
 
+# Entities can be encoded more than once; two passes covers what Marker emits
+# and the bound stops a pathological input from spinning.
+_MAX_UNESCAPE_PASSES = 5
+
 # Image magic numbers, so a figure is saved with the extension it actually is
 # rather than one we assumed.
 _MAGIC: tuple[tuple[bytes, str], ...] = (
@@ -64,6 +68,37 @@ def is_group_reference(fragment: str) -> bool:
     data, which is worse than silence.
     """
     return "<content-ref" in fragment and "<table" not in fragment.lower()
+
+
+def unescape_fully(text: str) -> str:
+    """Resolve HTML entities until stable.
+
+    Marker derives equation LaTeX from HTML that is itself already escaped, so
+    an `&` in an `aligned` block arrives as `&amp;amp;`. A single unescape
+    turns that into `&amp;`, which still reaches the agent as an entity inside
+    `$$…$$` — the alignment operator of a central equation rendered as markup.
+    `html.unescape` is idempotent once no entities remain, so this terminates.
+    """
+    for _ in range(_MAX_UNESCAPE_PASSES):
+        resolved = html.unescape(text)
+        if resolved == text:
+            return text
+        text = resolved
+    return text
+
+
+def _rendered_cell_count(table_markdown: str) -> int:
+    """How many real cells a rendered markdown table contains."""
+    total = 0
+    for line in table_markdown.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if all(set(c) <= {"-", ":"} and c for c in cells):
+            continue  # separator row
+        total += len(cells)
+    return total
 
 
 def strip_html(fragment: str) -> str:
@@ -104,6 +139,24 @@ def marker_doc_to_bundle_parts(
     # Caption's text to the figure it labels but leaves the Caption block in
     # the stream, so without this the same sentence lands twice.
     consumed_captions: set[str] = set()
+    # Cells the last rendered table produced, against the cells Marker
+    # actually found. Suppressing TableCell blocks is only safe while the
+    # rendered table still carries them; when the render collapses columns,
+    # those blocks are the sole surviving copy and dropping them loses the
+    # data outright. Compare, and say so.
+    pending_table: list[int] | None = None
+
+    def _close_pending_table() -> None:
+        nonlocal pending_table
+        if pending_table is None:
+            return
+        rendered, found = pending_table
+        pending_table = None
+        if found > rendered:
+            warnings.append(
+                f"table rendered {rendered} of the {found} cells Marker found; "
+                f"{found - rendered} were dropped — treat this table as incomplete"
+            )
 
     for block in doc.blocks:
         kind = block.block_type
@@ -152,9 +205,14 @@ def marker_doc_to_bundle_parts(
             continue
 
         if kind in ("Table", "TableGroup"):
+            # Cells belong to the most recent table, and other blocks can sit
+            # between the two (a real page ran Table -> Reference -> cells),
+            # so only a new table closes the previous one's accounting.
+            _close_pending_table()
             table = html_table_to_markdown(block.html)
             if table:
                 parts.append(f"\n\n{table}\n")
+                pending_table = [_rendered_cell_count(table), 0]
             else:
                 # Falling back to stripped text would produce the cell-blob
                 # this pipeline exists to avoid, so flag it instead.
@@ -165,6 +223,8 @@ def marker_doc_to_bundle_parts(
             continue
 
         if kind == "TableCell":
+            if pending_table is not None:
+                pending_table[1] += 1
             # Already rendered. Marker's flatten appends a block and then
             # recurses into its children, so every cell of the Table above
             # arrives again as its own record — and the Table's own html
@@ -180,7 +240,7 @@ def marker_doc_to_bundle_parts(
             # entity-encoded: `\lambda &lt; \lambda'`. `strip_html` unescapes
             # for every other block type, and this branch skipped it, sending
             # the entity through to the agent inside `$$…$$`.
-            latex = html.unescape(block.latex or "").strip()
+            latex = unescape_fully(block.latex or "").strip()
             if latex:
                 parts.append(f"\n\n$$\n{latex}\n$$\n")
             else:
@@ -204,6 +264,8 @@ def marker_doc_to_bundle_parts(
         text = strip_html(block.html)
         if text:
             parts.append(f"\n\n{text}\n")
+
+    _close_pending_table()  # a table whose cells run to the end still reports
 
     markdown = _BLANKS_RE.sub("\n\n", "".join(parts)).strip()
     return markdown, figures, warnings
