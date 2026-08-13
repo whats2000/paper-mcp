@@ -26,6 +26,11 @@ services:
       - PAPER_MCP_LOG_LEVEL=${PAPER_MCP_LOG_LEVEL:-warning}
     volumes:
       - paper-mcp-artifacts:/app/artifacts
+    # nsjail creates namespaces, which Docker's default seccomp profile
+    # blocks; without this every compile fails to launch. Measured: no
+    # SYS_ADMIN and no --privileged are needed, only the seccomp exemption.
+    security_opt:
+      - seccomp=unconfined
     depends_on:
       - marker
     restart: unless-stopped

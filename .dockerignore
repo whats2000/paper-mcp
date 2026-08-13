@@ -1,0 +1,16 @@
+.git
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+__pycache__
+*.pyc
+artifacts/
+.check-artifacts/
+marker_service/
+docs/
+tests/
+scripts/
+.vscode/

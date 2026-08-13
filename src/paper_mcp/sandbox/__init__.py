@@ -87,17 +87,24 @@ def build_policy(workdir: Path, *, auth_mode: str | None = None) -> SandboxPolic
 def _nsjail_argv(workdir: Path) -> list[str]:
     """nsjail invocation confining one compile.
 
-    No network at all, a read-only view of the TeX installation, a writable
-    tmpfs for the job, an unprivileged uid, and rlimits that bound cpu,
-    memory, output size and process count.
+    No network, a read-only view of the system, a writable job directory, and
+    rlimits bounding cpu, memory, output size and process count.
+
+    Two things measured in-container rather than assumed:
+
+    * `/etc` and `/var` must be mounted — TeX reads its configuration and
+      format caches from them, and without them every compile dies with
+      "Emergency stop" and no PDF.
+    * Docker's default seccomp profile blocks the namespace `clone()` nsjail
+      needs, so the container must run with `seccomp=unconfined`. That is
+      narrower than it sounds: it does not grant capabilities, and no
+      `SYS_ADMIN` or `--privileged` is required (both were tried).
     """
     return [
         NSJAIL,
         "--quiet",
         "--mode", "o",              # run once, then exit
         "--hostname", "sandbox",
-        "--user", "65534",          # nobody
-        "--group", "65534",
         # nsjail clones a fresh network namespace by default, so there is no
         # route out; dropping loopback too leaves no interface at all.
         "--iface_no_lo",
@@ -106,11 +113,16 @@ def _nsjail_argv(workdir: Path) -> list[str]:
         "--rlimit_fsize", str(_MAX_FILE_SIZE_MB),
         "--rlimit_nproc", str(_MAX_PIDS),
         "--cwd", str(workdir),
-        # Read-only system; the job directory is the only writable path.
+        # Read-only system, writable job dir. /etc and /var are not optional:
+        # TeX reads its configuration from /etc/texmf and its format/font
+        # caches from /var/lib/texmf, and without them pdflatex aborts with
+        # "Emergency stop" and produces no PDF. Verified in-container.
         "--bindmount_ro", "/usr:/usr",
         "--bindmount_ro", "/bin:/bin",
         "--bindmount_ro", "/lib:/lib",
         "--bindmount_ro", "/lib64:/lib64",
+        "--bindmount_ro", "/etc:/etc",
+        "--bindmount_ro", "/var:/var",
         "--bindmount", f"{workdir}:{workdir}",
         "--",
     ]
