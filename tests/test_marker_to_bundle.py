@@ -48,6 +48,24 @@ def test_equations_stay_latex(tmp_path: Path) -> None:
     assert "E = mc^2" in markdown
 
 
+def test_equation_latex_is_html_unescaped(tmp_path: Path) -> None:
+    # Marker derives `latex` from HTML, so comparisons arrive entity-encoded.
+    # Emitted raw, `\lambda &lt; \lambda'` reaches the agent as literal
+    # "&lt;" — a renderer shows the entity or errors, and the guarantee that
+    # equations stay LaTeX is broken exactly where maths is hardest to guess.
+    doc = _doc(
+        MarkerBlock(
+            block_type="Equation",
+            latex=r"a &lt; b \text{ and } c &gt; d \ \&amp;\ e",
+        )
+    )
+
+    markdown, _f, _w = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert r"a < b \text{ and } c > d \ \&\ e" in markdown
+    assert "&lt;" not in markdown and "&gt;" not in markdown and "&amp;" not in markdown
+
+
 def test_figures_are_extracted_indexed_and_captioned(tmp_path: Path) -> None:
     doc = _doc(
         MarkerBlock(
@@ -156,6 +174,91 @@ def test_an_unrenderable_table_is_flagged_not_flattened(tmp_path: Path) -> None:
 
     assert "table" in " ".join(warnings).lower()
     assert markdown == ""
+
+
+def test_table_cells_do_not_reappear_as_a_text_blob(tmp_path: Path) -> None:
+    """Marker emits a Table and then each of its cells as sibling blocks.
+
+    Shape taken verbatim from a real extraction: `_flatten` appends a block
+    and then recurses into its children, so every `TableCell` under a `Table`
+    arrives again as its own record. Rendering those as loose text reproduces
+    exactly the cell blob this module exists to prevent — the table is already
+    rendered in full from the `Table` block's own html.
+
+    Measured on arXiv:1706.03762: every table was followed by its own cell
+    values as prose, and Table 2's stripped columns let "38.1" (an EN-FR BLEU
+    score) sit under a "Training Cost (FLOPs)" heading.
+    """
+    doc = _doc(
+        MarkerBlock(
+            block_type="Table",
+            html=(
+                "<table><tbody><tr><th>Model</th><th>BLEU</th></tr>"
+                "<tr><td>Base</td><td>27.3</td></tr>"
+                "<tr><td>Big</td><td>28.4</td></tr></tbody></table>"
+            ),
+        ),
+        MarkerBlock(block_type="TableCell", html="<th>Model</th>"),
+        MarkerBlock(block_type="TableCell", html="<th>BLEU</th>"),
+        MarkerBlock(block_type="TableCell", html="<td>Base</td>"),
+        MarkerBlock(block_type="TableCell", html="<td>27.3</td>"),
+        MarkerBlock(block_type="TableCell", html="<td>Big</td>"),
+        MarkerBlock(block_type="TableCell", html="<td>28.4</td>"),
+    )
+
+    markdown, _figures, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert "| Base | 27.3 |" in markdown, "the table itself must still render"
+    loose = [
+        line.strip()
+        for line in markdown.splitlines()
+        if line.strip() and not line.strip().startswith("|")
+    ]
+    assert loose == [], f"cell values re-emitted as prose: {loose}"
+    assert warnings == []
+
+
+def test_a_consumed_figure_caption_is_not_repeated_as_prose(tmp_path: Path) -> None:
+    """The Caption block stays in the list after its text is attached.
+
+    The Marker service copies a sibling Caption's text onto the figure it
+    labels, but leaves the Caption block in the stream, so the same sentence
+    is rendered twice — once under the image, once as a loose paragraph.
+    Seen on arXiv:1706.03762 for all six figures.
+    """
+    doc = _doc(
+        MarkerBlock(
+            block_type="Figure",
+            images={"a": _PNG},
+            caption="Figure 1: The Transformer - model architecture.",
+        ),
+        MarkerBlock(
+            block_type="Caption",
+            html="<p>Figure 1: The Transformer - model architecture.</p>",
+        ),
+    )
+
+    markdown, figures, _w = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert figures[0].caption == "Figure 1: The Transformer - model architecture."
+    assert markdown.count("The Transformer - model architecture.") == 1, markdown
+
+
+def test_a_table_caption_is_still_kept(tmp_path: Path) -> None:
+    # Only captions already consumed by a figure are redundant. A table's
+    # caption is never attached to anything, so dropping it would strip the
+    # label that says what the table below is.
+    doc = _doc(
+        MarkerBlock(block_type="Caption", html="<p>Table 1: Maximum path lengths.</p>"),
+        MarkerBlock(
+            block_type="Table",
+            html="<table><tr><th>A</th></tr><tr><td>1</td></tr></table>",
+        ),
+    )
+
+    markdown, _f, _w = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert "Table 1: Maximum path lengths." in markdown
 
 
 def test_figures_are_numbered_in_document_order(tmp_path: Path) -> None:

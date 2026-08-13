@@ -100,6 +100,10 @@ def marker_doc_to_bundle_parts(
     parts: list[str] = []
     figures: list[FigureRef] = []
     warnings: list[str] = []
+    # Captions already printed under a figure. The service attaches a sibling
+    # Caption's text to the figure it labels but leaves the Caption block in
+    # the stream, so without this the same sentence lands twice.
+    consumed_captions: set[str] = set()
 
     for block in doc.blocks:
         kind = block.block_type
@@ -143,6 +147,8 @@ def marker_doc_to_bundle_parts(
             # Reference the figure inline so the agent meets it in context,
             # where the surrounding prose explains it.
             parts.append(f"\n\n![{fid}](figures/{name})\n\n*{fid}: {caption}*\n")
+            if caption:
+                consumed_captions.add(caption)
             continue
 
         if kind in ("Table", "TableGroup"):
@@ -158,8 +164,23 @@ def marker_doc_to_bundle_parts(
                 warnings.append(f"table not rendered as markdown; html head: {head!r}")
             continue
 
+        if kind == "TableCell":
+            # Already rendered. Marker's flatten appends a block and then
+            # recurses into its children, so every cell of the Table above
+            # arrives again as its own record — and the Table's own html
+            # already carries all of them. Emitting these as loose text
+            # rebuilds, verbatim, the cell blob this module exists to prevent.
+            # An unrenderable table warns (see above) rather than falling back
+            # to its cells, so dropping them here loses nothing that is not
+            # already reported.
+            continue
+
         if kind == "Equation":
-            latex = (block.latex or "").strip()
+            # Marker derives `latex` from HTML, so comparisons arrive
+            # entity-encoded: `\lambda &lt; \lambda'`. `strip_html` unescapes
+            # for every other block type, and this branch skipped it, sending
+            # the entity through to the agent inside `$$…$$`.
+            latex = html.unescape(block.latex or "").strip()
             if latex:
                 parts.append(f"\n\n$$\n{latex}\n$$\n")
             else:
@@ -176,6 +197,9 @@ def marker_doc_to_bundle_parts(
 
         if kind in ("PageHeader", "PageFooter"):
             continue  # running heads add nothing and interrupt the prose
+
+        if kind in ("Caption", "Footnote") and strip_html(block.html) in consumed_captions:
+            continue  # already printed under its figure
 
         text = strip_html(block.html)
         if text:
