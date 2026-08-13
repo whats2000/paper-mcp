@@ -76,6 +76,35 @@ identity degrades to a quota key.
 | OIDC auth + quota | D | ✅ shipped |
 | Portable skills (examples, not the product) | E | ✅ shipped — served as MCP prompts |
 
+## Connecting a client
+
+The service speaks Streamable HTTP at `/mcp`. A local Claude Code session
+connects with an `.mcp.json` pointing at your own instance:
+
+```json
+{
+  "mcpServers": {
+    "paper-mcp": { "type": "http", "url": "http://127.0.0.1:8000/mcp" }
+  }
+}
+```
+
+Against a deployment with `AUTH_MODE=oidc`, the client sends a bearer token
+from your IdP on **every** request — there is no session to authenticate once
+and reuse:
+
+```json
+{
+  "mcpServers": {
+    "paper-mcp": {
+      "type": "http",
+      "url": "https://paper-mcp.example.org/mcp",
+      "headers": { "Authorization": "Bearer ${PAPER_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
 ## Development
 
 ```bash
@@ -184,6 +213,36 @@ Claude client surfaces them as slash commands:
 They are **examples, not the product.** The calling agent owns its pipelines
 and can ignore them entirely — which is exactly why this service ships tools
 rather than flows.
+
+## Security
+
+The service is internet-facing and executes caller-supplied LaTeX, so the
+controls are verified against a **running container** rather than a test
+client. That distinction is not pedantry: `TestClient` follows redirects, and
+that is exactly how a `307` on `POST /mcp` passed the suite while a connector
+would have broken on it. A property that only holds in-process is a property
+of a stack nobody is attacking.
+
+The attack surface exercised, against a real IdP: tokens that are missing,
+malformed, expired, minted for another audience, issued by another issuer, or
+signed by an unknown key; **`alg=none` signature stripping** and
+**RS256→HS256 key confusion**, the two forgeries a header-trusting verifier
+accepts; uniform rejection bodies, so a probe cannot learn which check failed;
+DNS-rebinding via `Host`; six encodings of artifact path traversal; quota
+exhaustion with `Retry-After`; and shell-escape, absolute-path and
+escaping-asset probes driven through the real `compile_latex` tool inside the
+jail. All 26 defended.
+
+Attack the image you are shipping, and confirm the **installed** package
+carries the controls before trusting the result. One run reported a total auth
+bypass that did not exist in the code: the image predated the middleware.
+
+The converse matters as much — a service that rejects everyone is trivially
+secure and useless. So the whole product is also driven through a real MCP
+client bearing a real token, resolve through extraction to a compiled deck,
+confirming that **no session identifier is ever issued**: the server is
+`stateless_http`, so there is no handle to leak, and every request carries its
+own credential.
 
 ## Configuration
 
