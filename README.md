@@ -1,18 +1,41 @@
-# paper-mcp
+<div align="center">
 
-**Ready-to-use tools that give an LLM agent a paper it can actually work with:
-the full text as markdown, and an index of every figure with its caption.**
+# 📄 paper-mcp
 
-Built for external agent clients (Claude Cowork, Claude Desktop, Cursor, any MCP
-framework). It supplies what those clients lack — paper acquisition and faithful
-extraction — and nothing else: **no accounts, no stored user data, no
-server-side LLM calls, and no agent flows.**
+**Ready-to-use tools that give an LLM agent a paper it can actually work with.**
 
-This is *data-processing functionality*, not an agent. Pipelines built on top —
-slides, summaries, literature reviews — belong to the calling agent and its own
-skills. This service's only job is to make each step precise.
+The full text as markdown · every figure indexed with its caption · a sandboxed LaTeX compiler — served over MCP, stateless, multi-user.
 
-## What you get
+![Python](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)
+![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-000000)
+![Extraction](https://img.shields.io/badge/extraction-Marker%20(GPU)-FF6F00)
+![Sandbox](https://img.shields.io/badge/sandbox-nsjail%20%2B%20TeX%20Live-4B275F)
+![Auth](https://img.shields.io/badge/auth-OIDC%20resource%20server-2A6DB2)
+![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
+![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
+![Tests](https://img.shields.io/badge/tests-189%20unit%20%2B%207%20integration-brightgreen)
+
+</div>
+
+---
+
+Built for external agent clients (Claude Cowork, Claude Desktop, Cursor, any MCP framework). It supplies what those clients lack — paper acquisition and faithful extraction — and nothing else: **no accounts, no stored user data, no server-side LLM calls, and no agent flows.**
+
+This is *data-processing functionality*, not an agent. Pipelines built on top — slides, summaries, literature reviews — belong to the calling agent and its own skills. This service's only job is to make each step precise.
+
+## 🧰 The tools
+
+| Tool | What it does | Network scope |
+| --- | --- | --- |
+| `search_arxiv` | Search arXiv by relevance. Metadata only — nothing is downloaded | `arxiv.org` |
+| `search_papers` | Search Semantic Scholar's full corpus — broader than arXiv, with venues and citation counts | `api.semanticscholar.org` |
+| `find_related` | Citations, references, or recommendations for a paper | `api.semanticscholar.org` |
+| `resolve_paper` | Turn an arXiv id, DOI, `ss:` id, or a free-text title into one normalized reference — and say where an open-access copy lives | arXiv · S2 · Unpaywall |
+| **`fetch_paper`** | **The product.** PDF → markdown + figure index, content-addressed and cached. Returns a job handle while the GPU works | arXiv + Marker |
+| `get_job` | Poll an extraction | — |
+| `compile_latex` | Compile caller-supplied LaTeX in a jail and return structured errors. A **tool, not a flow** — it never loops, revises, or authors | none (denied in-jail) |
+
+## 📦 What you get
 
 `fetch_paper("arxiv:1706.03762")` returns the paper as markdown —
 
@@ -46,40 +69,37 @@ $$
 ]
 ```
 
-Extraction is **Marker**, and only Marker. Three guarantees, each asserted by
-tests and by a real-workflow check:
+Extraction is **Marker**, and only Marker. Three guarantees, each asserted by tests and by a real-workflow check:
 
-- **Tables stay tables** — rows and columns intact. A table flattened to a blob
-  of cell text invites an agent to read numbers against the wrong column.
+- **Tables stay tables** — rows and columns intact. A table flattened to a blob of cell text invites an agent to read numbers against the wrong column.
 - **Equations stay LaTeX** — never prose approximations of maths.
-- **Figures are extracted, indexed and captioned** — an index entry exists only
-  when the image really decoded to disk, so citing `fig-001` always refers to
-  something real.
+- **Figures are extracted, indexed and captioned** — an index entry exists only when the image really decoded to disk, so citing `fig-001` always refers to something real.
 
-There is no low-fidelity fallback engine. PaperHub shipped crude PyMuPDF
-extraction once, measured the output as "conference-UNusable", and replaced it
-with Marker; a service whose value is faithful extraction must not quietly
-substitute unfaithful extraction. Without Marker, a PDF fetch reports
-`extraction_unavailable` rather than degrading.
+There is no low-fidelity fallback engine. PaperHub shipped crude PyMuPDF extraction once, measured the output as "conference-UNusable", and replaced it with Marker; a service whose value is faithful extraction must not quietly substitute unfaithful extraction. Without Marker, a PDF fetch reports `extraction_unavailable` rather than degrading.
 
-Statelessness is the security architecture, not an omission. With no per-user
-state, a shared public endpoint has nothing to leak between callers, and
-identity degrades to a quota key.
+---
 
-## Status
+## 🚀 Quick start
 
-| Tool | Phase | Status |
-| --- | --- | --- |
-| `search_arxiv` · `search_papers` · `find_related` · `resolve_paper` | A | ✅ shipped |
-| `fetch_paper` · `get_job` + artifact serving | B | ✅ shipped — verified against real Marker |
-| `compile_latex` (sandboxed, a tool — not a flow) | C | ✅ shipped — jail verified in-container |
-| OIDC auth + quota | D | ✅ shipped |
-| Portable skills (examples, not the product) | E | ✅ shipped — served as MCP prompts |
+```bash
+git clone https://github.com/whats2000/paper-mcp.git
+cd paper-mcp
 
-## Connecting a client
+docker compose up -d --build      # paper-mcp on :8000, Marker on :8002
+curl -s http://127.0.0.1:8000/health
+```
 
-The service speaks Streamable HTTP at `/mcp`. A local Claude Code session
-connects with an `.mcp.json` pointing at your own instance:
+The first build downloads TeX Live and ~2 GB of Surya weights; both persist in named volumes, so a rebuild never re-pays for them.
+
+> [!NOTE]
+> **GPU strongly recommended.** Marker runs on CPU but far too slowly to be useful. `MARKER_MAX_PAGES=1` bounds VRAM per call — VRAM scales with page *content density*, not page count, and one dense two-column page can saturate 6 GB. Raise it only on a bigger GPU.
+
+> [!IMPORTANT]
+> The default `AUTH_MODE=open` means **every caller is unauthenticated**. Before exposing this anywhere, set the OIDC variables and your own hostname in `PAPER_MCP_ALLOWED_HOSTS` — see [Configuration](#️-configuration).
+
+## 🔌 Connecting a client
+
+The service speaks Streamable HTTP at `/mcp`. A local Claude Code session connects with an `.mcp.json` pointing at your own instance:
 
 ```json
 {
@@ -89,9 +109,7 @@ connects with an `.mcp.json` pointing at your own instance:
 }
 ```
 
-Against a deployment with `AUTH_MODE=oidc`, the client sends a bearer token
-from your IdP on **every** request — there is no session to authenticate once
-and reuse:
+Against a deployment with `AUTH_MODE=oidc`, the client sends a bearer token from your IdP on **every** request — there is no session to authenticate once and reuse:
 
 ```json
 {
@@ -105,146 +123,71 @@ and reuse:
 }
 ```
 
-## Development
+---
 
-```bash
-uv sync
-uv run pytest                    # fast, offline (integration excluded)
-uv run pytest -m integration     # spawns a real server, drives it with a real MCP client
-uv run ruff check src tests
-uv run mypy src
+## 🗺️ Architecture (one screen)
 
-docker compose up -d marker      # required for extraction
-uv run paper-mcp
 ```
+┌──────────────────────┐  Streamable HTTP  ┌─────────────────────────────────────────────┐
+│  MCP client          │  ───────────────► │  paper-mcp · POST /mcp                      │
+│  Claude Cowork /     │  Bearer <token>   │                                             │
+│  Desktop / Cursor /  │                   │   OIDC verify ─► quota ─► allowed-host ─► …  │
+│  any MCP framework   │                   │        │                                     │
+└──────────────────────┘                   │        ├─ discovery ► arXiv · S2 · Unpaywall │
+           ▲                               │        ├─ fetch ────► job ─► Marker (GPU)    │
+           │  GET /a/<token>/…             │        └─ compile ──► nsjail + pdflatex      │
+           └────────────────────────────── │                                             │
+              figures · bundle.zip · pdf   │   artifacts: content-addressed, TTL-swept    │
+                                           └─────────────────────────────────────────────┘
+```
+
+**Nothing per-user is stored.** Artifacts are keyed by content, not by caller: two people asking for the same public paper share one entry, which is deduplication of public data rather than a leak. Identity exists only as a salted hash used to meter quota. That is the security architecture, not an omission — a shared public endpoint with no per-user state has nothing to leak between callers.
+
+Full architecture lives in the [SRS](docs/superpowers/specs/2026-08-11-paper-mcp-srs.md).
+
+---
+
+## 🛡️ Security
+
+The service is internet-facing and executes caller-supplied LaTeX, so the controls are verified against a **running container** rather than a test client. That distinction is not pedantry: `TestClient` follows redirects, and that is exactly how a `307` on `POST /mcp` passed the suite while a connector would have broken on it. A property that only holds in-process is a property of a stack nobody is attacking.
+
+The attack surface exercised, against a real IdP:
+
+| Class | Covered |
+| --- | --- |
+| **Token** | missing · malformed · expired · wrong audience (confused deputy) · wrong issuer · unknown signing key |
+| **Forgery** | **`alg=none` signature stripping** · **RS256→HS256 key confusion** — the two a header-trusting verifier accepts |
+| **Oracle** | rejection bodies are byte-identical, so a probe cannot learn *which* check failed |
+| **Transport** | DNS rebinding via `Host` (`421`) · no redirect on `POST /mcp` |
+| **Artifacts** | six traversal encodings — plain, url-encoded, double-encoded, backslash, absolute, unknown token |
+| **Abuse** | quota exhaustion answering `429` with `Retry-After` |
+| **Sandbox** | shell escape · absolute-path read · escaping asset path, driven through the real `compile_latex` inside the jail |
+
+All 26 defended. Two rules that made the result trustworthy, both learned the hard way:
+
+1. **Attack the image you ship, and confirm the *installed* package carries the controls first.** One run reported a total auth bypass that did not exist in the code — the image predated the middleware.
+2. **Prove the guards don't break the product.** A service that rejects everyone is trivially secure and useless, so the whole flow is also driven through a real MCP client bearing a real token — resolve → extraction → compiled deck — confirming that **no session identifier is ever issued**: the server is `stateless_http`, so there is no handle to leak, and every request carries its own credential.
 
 ### Compiling LaTeX
 
-`compile_latex` executes caller-supplied source, so it runs behind three
-layers: TeX flags (`-no-shell-escape`, `openin_any=p`, `openout_any=p`),
-**nsjail**, and wall-clock/output caps. One attempt, structured errors with
-file and line, no revise loop — the calling agent fixes and resubmits.
+`compile_latex` executes caller-supplied source, so it runs behind three layers: TeX flags (`-no-shell-escape`, `openin_any=p`, `openout_any=p`), **nsjail**, and wall-clock/output caps. One attempt, structured errors with file and line, no revise loop — the calling agent fixes and resubmits.
 
-**Without a sandbox it refuses.** nsjail is Linux-only, so on a host lacking
-it the tool returns `sandbox_unavailable` unless `PAPER_MCP_AUTH_MODE=open`.
-Declining costs a caller one retry; running a stranger's program unisolated
-costs the host.
+**Without a sandbox it refuses.** nsjail is Linux-only, so on a host lacking it the tool returns `sandbox_unavailable` unless `PAPER_MCP_AUTH_MODE=open`. Declining costs a caller one retry; running a stranger's program unisolated costs the host.
 
-The container needs `seccomp=unconfined` (already in `docker-compose.yml`):
-Docker's default profile blocks the namespace `clone()` nsjail requires, and
-without it every compile fails to launch. Measured — `SYS_ADMIN` and
-`--privileged` are *not* needed, which keeps the exemption narrow.
+The container needs `seccomp=unconfined` (already in `docker-compose.yml`): Docker's default profile blocks the namespace `clone()` nsjail requires, and without it every compile fails to launch. Measured — `SYS_ADMIN` and `--privileged` are *not* needed, which keeps the exemption narrow.
 
 ```bash
 # the release gate: adversarial corpus inside the jail
-docker run --rm --security-opt seccomp=unconfined   -v "$PWD/scripts:/app/scripts:ro" paper-mcp   python /app/scripts/sandbox_corpus.py
+docker run --rm --security-opt seccomp=unconfined \
+  -v "$PWD/scripts:/app/scripts:ro" paper-mcp \
+  python /app/scripts/sandbox_corpus.py
 ```
 
-Ten cases locally and nine in-jail, each failing closed: shell escape does not
-execute, absolute-path and traversal reads are refused, writes outside the job
-directory are refused, unbounded expansion is killed, no network is reachable
-from inside the jail — and a benign document still compiles.
+Ten cases locally and nine in-jail, each failing closed: shell escape does not execute, absolute-path and traversal reads are refused, writes outside the job directory are refused, unbounded expansion is killed, no network is reachable from inside the jail — and a benign document still compiles.
 
-### The check that decides whether this works
+---
 
-```bash
-uv run python scripts/paper_workflow_check.py 1706.03762
-```
-
-Drives the real workflow over MCP against the real Marker service and judges
-the *content*: does the markdown have tables with separator rows, equations as
-LaTeX, a populated and captioned figure index, and figure URLs that download
-real image bytes? A green pytest says the code runs; this says an agent can use
-the output. Slow by nature — Marker takes roughly a minute per dense page.
-
-The interpreter is pinned in `.python-version` (3.13) so every contributor and
-the container build agree on one runtime (NFR-07).
-
-> **If uv warns `VIRTUAL_ENV=… does not match the project environment path .venv`**
-> — and your editor reports this project's dependencies as "not installed" —
-> both have one cause: **VS Code's selected Python interpreter.**
->
-> The Python extension exports the selected interpreter as `VIRTUAL_ENV` into
-> its terminals and into extension-spawned processes (which is how Claude Code's
-> shells inherit it). If that interpreter is a *bare* Python install rather than
-> a virtualenv — a uv-managed `…/uv/python/cpython-3.x…/python.exe`, say, which
-> has no `pyvenv.cfg` — then uv correctly refuses it and Pylance resolves
-> against an interpreter lacking this project's packages.
->
-> `.vscode/settings.json` fixes it for this repo by pointing
-> `python.defaultInterpreterPath` at `${workspaceFolder}/.venv`; **reload the
-> window** for it to take effect. To fix it everywhere, repoint the user-level
-> `python.defaultInterpreterPath` in your VS Code settings.
->
-> Things that do **not** fix it, tested: pinning `.python-version` (it selects
-> an interpreter; the warning compares environment *paths*), and
-> `UV_NO_ACTIVE=1`. There is no `pyproject.toml` or `uv.toml` key for it. The
-> ad-hoc escape is `uv run --no-active …` — a real flag, though `uv run --help`
-> documents only its `--active` counterpart.
-
-The integration suite is the one that matters for protocol correctness. It
-spawns an actual `paper-mcp` process and connects with the MCP client library,
-so it exercises the `initialize` handshake, transport framing, and the exact
-URL an operator pastes into a connector. It has already caught two bugs the
-in-process tests structurally could not see: a `307` redirect on `POST /mcp`
-(the in-process test client follows redirects), and a Semantic Scholar field
-name accepted by one endpoint and rejected by another.
-
-Verify it end to end:
-
-```bash
-curl -s http://127.0.0.1:8000/health
-curl -s -X POST http://127.0.0.1:8000/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-```
-
-## Skills
-
-Two starting-point skills ship in `skills/`, also served over `prompts/` so a
-Claude client surfaces them as slash commands:
-
-| Skill | Shows an agent how to |
-| --- | --- |
-| `paper-to-deck` | build a Beamer deck grounded in figures the paper actually contains |
-| `deep-read` | answer questions from the bundle rather than from memory of the paper |
-
-They are **examples, not the product.** The calling agent owns its pipelines
-and can ignore them entirely — which is exactly why this service ships tools
-rather than flows.
-
-## Security
-
-The service is internet-facing and executes caller-supplied LaTeX, so the
-controls are verified against a **running container** rather than a test
-client. That distinction is not pedantry: `TestClient` follows redirects, and
-that is exactly how a `307` on `POST /mcp` passed the suite while a connector
-would have broken on it. A property that only holds in-process is a property
-of a stack nobody is attacking.
-
-The attack surface exercised, against a real IdP: tokens that are missing,
-malformed, expired, minted for another audience, issued by another issuer, or
-signed by an unknown key; **`alg=none` signature stripping** and
-**RS256→HS256 key confusion**, the two forgeries a header-trusting verifier
-accepts; uniform rejection bodies, so a probe cannot learn which check failed;
-DNS-rebinding via `Host`; six encodings of artifact path traversal; quota
-exhaustion with `Retry-After`; and shell-escape, absolute-path and
-escaping-asset probes driven through the real `compile_latex` tool inside the
-jail. All 26 defended.
-
-Attack the image you are shipping, and confirm the **installed** package
-carries the controls before trusting the result. One run reported a total auth
-bypass that did not exist in the code: the image predated the middleware.
-
-The converse matters as much — a service that rejects everyone is trivially
-secure and useless. So the whole product is also driven through a real MCP
-client bearing a real token, resolve through extraction to a compiled deck,
-confirming that **no session identifier is ever issued**: the server is
-`stateless_http`, so there is no handle to leak, and every request carries its
-own credential.
-
-## Configuration
+## ⚙️ Configuration
 
 Environment only (twelve-factor). Nothing is read from a config file.
 
@@ -263,17 +206,14 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_S2_API_KEY` | unset | **Effectively required in production** — see below |
 | `PAPER_MCP_MARKER_URL` | `http://127.0.0.1:8002` | Marker service. **Required for extraction** — without it `fetch_paper` reports the dependency rather than degrading |
 | `PAPER_MCP_MARKER_MAX_PAGES` | `1` | Pages per Marker call. VRAM scales with page *content density*, not page count: one dense two-column page can saturate 6 GB, and a 5-page batch was measured at 21 minutes. Raise only on a bigger GPU |
+| `PAPER_MCP_PUBLIC_BASE_URL` | `http://localhost:8000` | Origin the artifact URLs are built from. Nothing is persisted with it — URLs are derived on every serve, so moving hosts does not strand a warm cache |
 | `PAPER_MCP_ARTIFACT_ROOT` | `artifacts` | Content-addressed cache for bundles and figure images |
 | `PAPER_MCP_ARTIFACT_TTL_HOURS` | `24` | How long artifacts survive before the sweeper reclaims them |
 | `PAPER_MCP_LOG_LEVEL` | `INFO` | Log level, applied to uvicorn too. `WARNING` drops per-request access logging: measured 18,222 → 114 bytes over 300 requests. Worth setting for a public deployment — a server whose stdout backs up blocks inside `write()`, and per-request logging is what fills the buffer |
 
 ### Semantic Scholar needs an API key
 
-Measured on-device against the live API: the keyless tier throttles the
-**search** endpoint so hard it is unusable. A single `search_papers` call
-still returned HTTP 429 after **237 seconds** of paced retries, and a title
-lookup after **873 seconds**. Single-paper lookups (`/paper/{id}` by arXiv id,
-DOI, or S2 id) and the citation-graph endpoints answered fine throughout.
+Measured on-device against the live API: the keyless tier throttles the **search** endpoint so hard it is unusable. A single `search_papers` call still returned HTTP 429 after **237 seconds** of paced retries, and a title lookup after **873 seconds**. Single-paper lookups (`/paper/{id}` by arXiv id, DOI, or S2 id) and the citation-graph endpoints answered fine throughout.
 
 So without `PAPER_MCP_S2_API_KEY`:
 
@@ -283,30 +223,105 @@ So without `PAPER_MCP_S2_API_KEY`:
 | `resolve_paper` by arXiv id / DOI / `ss:` id | `resolve_paper` by free-text title |
 | `find_related` (all three modes) | |
 
-Callers get a typed `rate_limited` error carrying `retry_after`, never a hang
-or a silently empty result — but the capability is degraded. Get a key at
-<https://www.semanticscholar.org/product/api>.
+Callers get a typed `rate_limited` error carrying `retry_after`, never a hang or a silently empty result — but the capability is degraded. Get a key at <https://www.semanticscholar.org/product/api>.
 
-### On-device acceptance check
+---
+
+## 🎓 Skills
+
+Two starting-point skills ship in `skills/`, also served over `prompts/` so a Claude client surfaces them as slash commands:
+
+| Skill | Shows an agent how to |
+| --- | --- |
+| `paper-to-deck` | build a Beamer deck grounded in figures the paper actually contains |
+| `deep-read` | answer questions from the bundle rather than from memory of the paper |
+
+They are **examples, not the product.** The calling agent owns its pipelines and can ignore them entirely — which is exactly why this service ships tools rather than flows.
+
+---
+
+## 🧑‍💻 Development
 
 ```bash
-uv run python scripts/on_device_check.py
+uv sync
+uv run pytest                    # 189 tests, fast and offline (integration excluded)
+uv run pytest -m integration     # spawns a real server, drives it with a real MCP client
+uv run ruff check src tests
+uv run mypy src                  # --strict
+
+docker compose up -d marker      # required for extraction
+uv run paper-mcp
 ```
 
-Boots the service through its real entry point and drives it with a real MCP
-client over the wire, covering every tool and every externally-dependent
-branch. Exits non-zero on failure; a throttled upstream is reported `skip`,
-never `pass`. Set `PAPER_MCP_S2_API_KEY` for a run with no skips.
+The interpreter is pinned in `.python-version` (3.13) so every contributor and the container build agree on one runtime (NFR-07).
 
-## Documentation
+**pytest proves the code runs; it cannot prove the product works.** Mocked tests are blind to upstream contracts by construction, so two on-device checks are load-bearing:
 
-- **Spec:** [docs/superpowers/specs/2026-08-11-paper-mcp-srs.md](docs/superpowers/specs/2026-08-11-paper-mcp-srs.md) — the single authoritative specification
-- **Plans:** [docs/superpowers/plans/](docs/superpowers/plans/)
+```bash
+uv run python scripts/on_device_check.py                 # every tool, every externally-dependent branch
+uv run python scripts/paper_workflow_check.py 1706.03762 # the real workflow, judged on content
+```
 
-## Provenance
+The first boots the service through its real entry point and drives it with a real MCP client over the wire. A throttled upstream is reported `skip`, never `pass` — a check that cannot reach its branch has not verified it.
 
-The extraction and LaTeX pipelines are ported from the
-[PaperHub](https://github.com/whats2000/PaperHub) proof-of-concept, which
-validated the end-to-end flow. Every ported file carries a header naming its
-source and what was adapted. The dependency arrow points one way — this project
-imports nothing from PaperHub.
+The second judges the *output*: does the markdown have tables with separator rows, equations as LaTeX, a populated and captioned figure index, and figure URLs that download real image bytes? Slow by nature — Marker takes roughly a minute per dense page.
+
+Between them these have caught defects the unit suite passed clean: a `307` redirect on `POST /mcp` (the in-process test client follows redirects), a Semantic Scholar field name one endpoint accepts and another rejects, a `similar` mode pointed at an endpoint that does not exist, a synchronous arXiv client blocking the event loop (three concurrent calls: 20.5 s → 0.7 s once threaded), and a bundle that persisted absolute artifact URLs — so a warm cache surviving a redeploy handed out figure links to an origin that no longer answered.
+
+<details>
+<summary><b>If uv warns <code>VIRTUAL_ENV=… does not match the project environment path .venv</code> →</b></summary>
+
+<br>
+
+That warning — and an editor reporting this project's dependencies as "not installed" — have one cause: **VS Code's selected Python interpreter.**
+
+The Python extension exports the selected interpreter as `VIRTUAL_ENV` into its terminals and into extension-spawned processes (which is how Claude Code's shells inherit it). If that interpreter is a *bare* Python install rather than a virtualenv — a uv-managed `…/uv/python/cpython-3.x…/python.exe`, say, which has no `pyvenv.cfg` — then uv correctly refuses it and Pylance resolves against an interpreter lacking this project's packages.
+
+`.vscode/settings.json` fixes it for this repo by pointing `python.defaultInterpreterPath` at `${workspaceFolder}/.venv`; **reload the window** for it to take effect. To fix it everywhere, repoint the user-level `python.defaultInterpreterPath` in your VS Code settings.
+
+Things that do **not** fix it, tested: pinning `.python-version` (it selects an interpreter; the warning compares environment *paths*), and `UV_NO_ACTIVE=1`. There is no `pyproject.toml` or `uv.toml` key for it. The ad-hoc escape is `uv run --no-active …` — a real flag, though `uv run --help` documents only its `--active` counterpart.
+
+</details>
+
+---
+
+## 📂 Repository layout
+
+```
+.
+├── src/paper_mcp/
+│   ├── server.py         # MCP server + FastAPI app · tools registered here
+│   ├── tools/            # discovery · fetch · compile — the MCP surface
+│   ├── pipelines/        # arXiv · Semantic Scholar · Marker → bundle · LaTeX
+│   ├── api/              # auth+quota middleware · artifact routes (GET /a/…)
+│   ├── sandbox/          # nsjail policy
+│   ├── artifacts.py      # content-addressed store + TTL sweeper
+│   ├── auth.py           # OIDC resource server (JWKS, rotation-aware)
+│   └── quota.py          # per-caller token buckets
+├── marker_service/       # the Marker extraction service (compose)
+├── skills/               # portable skills, also served as MCP prompts
+├── scripts/              # on-device and workflow checks
+├── tests/                # pytest suite + integration suite
+├── docs/superpowers/
+│   ├── specs/            # SRS — the single authoritative specification
+│   └── plans/            # implementation plans
+├── Dockerfile            # service + TeX Live + nsjail, one image
+└── docker-compose.yml    # paper-mcp + marker
+```
+
+`artifacts/` (gitignored) holds the content-addressed cache — derived data only, rebuildable from its key.
+
+---
+
+## 📖 Documentation
+
+- **[Software Requirements Specification](docs/superpowers/specs/2026-08-11-paper-mcp-srs.md)** — the single authoritative document for architecture, scope, and acceptance criteria (**v0.4**).
+- **[Implementation plans](docs/superpowers/plans/)** — one per phase, each executed via TDD.
+
+---
+
+## 🧬 Provenance
+
+The extraction and LaTeX pipelines are ported from the [PaperHub](https://github.com/whats2000/PaperHub) proof-of-concept, which validated the end-to-end flow inside a single-user local application. PaperHub proved the *pipeline*; it could not be the *product*, because the delivery target is a remote, multi-user, internet-facing service that executes untrusted input.
+
+Every ported file carries a header naming its source and what was adapted. The dependency arrow points one way — this project imports nothing from PaperHub.
