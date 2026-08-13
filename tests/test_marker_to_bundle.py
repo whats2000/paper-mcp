@@ -360,6 +360,61 @@ def test_double_encoded_equation_entities_are_fully_resolved(tmp_path: Path) -> 
     assert "&amp;" not in markdown
 
 
+def test_a_figure_contained_in_another_is_not_indexed_twice(tmp_path: Path) -> None:
+    """A sub-panel and its parent figure both carry the parent's caption.
+
+    Measured on arXiv:1706.03762 page 3, where Marker emitted the left half
+    of Figure 2 *and* the whole of Figure 2. Both were indexed, and both took
+    the caption "(left) Scaled Dot-Product Attention. (right) Multi-Head
+    Attention" — so an agent asked for Multi-Head Attention could cite the
+    crop, which does not contain it. An index entry that resolves to a real
+    image of the wrong thing is worse than a missing one: nothing about it
+    looks wrong.
+
+    Containment is the signal, not the caption: the inner block sits wholly
+    inside the outer one on the same page.
+    """
+    doc = _doc(
+        # inner: the left panel only, emitted first
+        MarkerBlock(
+            block_type="Figure",
+            images={"a": _PNG},
+            caption="Figure 2: (left) Scaled Dot-Product. (right) Multi-Head.",
+            page=3,
+            bbox=[148.0, 65.0, 300.0, 243.0],
+        ),
+        # outer: the whole figure
+        MarkerBlock(
+            block_type="Figure",
+            images={"b": _PNG},
+            caption="Figure 2: (left) Scaled Dot-Product. (right) Multi-Head.",
+            page=3,
+            bbox=[148.0, 65.0, 470.0, 243.0],
+        ),
+    )
+
+    markdown, figures, _w = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert len(figures) == 1, f"the crop must not be indexed: {figures}"
+    assert figures[0].id == "fig-001"
+    assert markdown.count("![fig-") == 1
+
+
+def test_figures_side_by_side_are_both_kept(tmp_path: Path) -> None:
+    # Only containment collapses an entry. Two genuinely separate figures on
+    # one page must both survive, or a paper's second panel disappears.
+    doc = _doc(
+        MarkerBlock(block_type="Figure", images={"a": _PNG}, caption="A", page=3,
+                    bbox=[100.0, 60.0, 240.0, 200.0]),
+        MarkerBlock(block_type="Figure", images={"b": _PNG}, caption="B", page=3,
+                    bbox=[260.0, 60.0, 400.0, 200.0]),
+    )
+
+    _md, figures, _w = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert [f.caption for f in figures] == ["A", "B"]
+
+
 def test_figures_are_numbered_in_document_order(tmp_path: Path) -> None:
     doc = _doc(
         MarkerBlock(block_type="Figure", images={"a": _PNG}, caption="A"),

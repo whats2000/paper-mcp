@@ -101,6 +101,51 @@ def _rendered_cell_count(table_markdown: str) -> int:
     return total
 
 
+_FIGURE_KINDS = ("Figure", "Picture", "FigureGroup")
+# Layout boxes are approximate; a couple of points of slop keeps a panel that
+# sits flush against its parent's edge from reading as "not contained".
+_BBOX_SLOP = 2.0
+
+
+def _area(bbox: list[float]) -> float:
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+
+
+def _contains(outer: list[float], inner: list[float]) -> bool:
+    return (
+        outer[0] <= inner[0] + _BBOX_SLOP
+        and outer[1] <= inner[1] + _BBOX_SLOP
+        and outer[2] >= inner[2] - _BBOX_SLOP
+        and outer[3] >= inner[3] - _BBOX_SLOP
+    )
+
+
+def suppressed_figures(blocks: list[MarkerBlock]) -> set[int]:
+    """Indices of figure blocks wholly inside another figure on the same page.
+
+    Marker can emit a sub-panel *and* the whole figure that contains it, and
+    the service gives both the same caption because both take it from the one
+    Caption block. Indexing both hands the agent two ids promising the same
+    content, one of which is a crop missing half of it — a citation that
+    resolves to a real image of the wrong thing. Keep the figure that holds
+    the whole caption's subject: the outer one.
+    """
+    boxed = [
+        (i, b)
+        for i, b in enumerate(blocks)
+        if b.block_type in _FIGURE_KINDS and b.images and len(b.bbox) == 4
+    ]
+    drop: set[int] = set()
+    for i, inner in boxed:
+        for j, outer in boxed:
+            if i == j or inner.page != outer.page:
+                continue
+            if _contains(outer.bbox, inner.bbox) and _area(outer.bbox) > _area(inner.bbox):
+                drop.add(i)
+                break
+    return drop
+
+
 def strip_html(fragment: str) -> str:
     """Plain text from a non-table HTML fragment, entities resolved."""
     text = _TAG_RE.sub(" ", fragment or "")
@@ -158,8 +203,15 @@ def marker_doc_to_bundle_parts(
                 f"{found - rendered} were dropped — treat this table as incomplete"
             )
 
-    for block in doc.blocks:
+    # Computed up front: a crop can arrive before the figure containing it,
+    # so the decision cannot be made from the blocks seen so far.
+    crops = suppressed_figures(doc.blocks)
+
+    for position, block in enumerate(doc.blocks):
         kind = block.block_type
+
+        if position in crops:
+            continue  # a panel of a figure indexed in full elsewhere
 
         # Group wrappers reference blocks that arrive separately; rendering
         # them would duplicate content and warn about tables that are fine.
