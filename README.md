@@ -73,8 +73,8 @@ identity degrades to a quota key.
 | `search_arxiv` · `search_papers` · `find_related` · `resolve_paper` | A | ✅ shipped |
 | `fetch_paper` · `get_job` + artifact serving | B | ✅ shipped — verified against real Marker |
 | `compile_latex` (sandboxed, a tool — not a flow) | C | ✅ shipped — jail verified in-container |
-| OIDC auth + quota | D | planned |
-| Portable skills (examples, not the product) | E | planned |
+| OIDC auth + quota | D | ✅ shipped |
+| Portable skills (examples, not the product) | E | ✅ shipped — served as MCP prompts |
 
 ## Development
 
@@ -171,6 +171,20 @@ curl -s -X POST http://127.0.0.1:8000/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
+## Skills
+
+Two starting-point skills ship in `skills/`, also served over `prompts/` so a
+Claude client surfaces them as slash commands:
+
+| Skill | Shows an agent how to |
+| --- | --- |
+| `paper-to-deck` | build a Beamer deck grounded in figures the paper actually contains |
+| `deep-read` | answer questions from the bundle rather than from memory of the paper |
+
+They are **examples, not the product.** The calling agent owns its pipelines
+and can ignore them entirely — which is exactly why this service ships tools
+rather than flows.
+
 ## Configuration
 
 Environment only (twelve-factor). Nothing is read from a config file.
@@ -180,7 +194,12 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_HOST` / `PAPER_MCP_PORT` | `0.0.0.0` / `8000` | Bind address |
 | `PAPER_MCP_ALLOWED_HOSTS` | localhost only | **DNS-rebinding protection.** A public deployment must list its own hostname or every request gets `421`. `*` disables the check and is warned about at boot |
 | `PAPER_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | CORS origins for browser clients |
-| `PAPER_MCP_AUTH_MODE` | `open` | `open` disables authentication — development only |
+| `PAPER_MCP_AUTH_MODE` | `open` | `open` disables authentication — development only. Anything else requires the OIDC settings below |
+| `PAPER_MCP_OIDC_ISSUER` / `PAPER_MCP_OIDC_AUDIENCE` | unset | The IdP to validate bearer tokens against. This service is a resource server: it never issues tokens |
+| `PAPER_MCP_SUBJECT_SALT` | per-process | Salt for the HMAC of `sub` used in metering and logs. The raw subject is never logged |
+| `PAPER_MCP_QUOTA_CALLS_PER_MINUTE` | `60` | Per-caller call budget |
+| `PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR` | `20` | Per-caller GPU-extraction budget |
+| `PAPER_MCP_QUOTA_COMPILE_SECONDS_PER_HOUR` | `600` | Per-caller compile budget, metered by time spent |
 | `PAPER_MCP_UNPAYWALL_EMAIL` | unset | Contact email enabling Unpaywall open-access lookup in `resolve_paper` |
 | `PAPER_MCP_S2_API_KEY` | unset | **Effectively required in production** — see below |
 | `PAPER_MCP_MARKER_URL` | `http://127.0.0.1:8002` | Marker service. **Required for extraction** — without it `fetch_paper` reports the dependency rather than degrading |
