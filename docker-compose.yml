@@ -61,6 +61,11 @@ services:
       # never exposed as a tool — and the service runs keyless without it
       # (SRS §I-7).
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # Which model that accuracy pass calls. marker-pdf carries its own
+      # default and Google has already retired it once — every call 404'd,
+      # Marker logged a warning, returned 200, and the pass silently stopped
+      # running. Empty falls back to the pinned default in llm_config.py.
+      - MARKER_GEMINI_MODEL=${MARKER_GEMINI_MODEL:-}
       - MARKER_MAX_PAGES=1
     volumes:
       # ~2 GB of Surya weights download once and persist across image

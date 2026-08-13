@@ -37,6 +37,7 @@ import tempfile
 from typing import Any
 
 from fastapi import FastAPI, File, Form, UploadFile
+from llm_config import gemini_model
 from marker.config.parser import ConfigParser
 from marker.converters.pdf import PdfConverter
 from marker.models import create_model_dict
@@ -128,6 +129,11 @@ def _converter(page_range: list[int] | None = None) -> PdfConverter:
     if key:
         cfg_dict["use_llm"] = True
         cfg_dict["gemini_api_key"] = key
+        # Pin the model. marker-pdf carries its own default, which has already
+        # been retired once; when that happens every LLM call 404s, Marker
+        # swallows it and returns 200, and the accuracy pass silently stops
+        # running. See llm_config for the full account.
+        cfg_dict["gemini_model_name"] = gemini_model()
     cfg = ConfigParser(cfg_dict)
     return PdfConverter(
         config=cfg.generate_config_dict(),
@@ -226,6 +232,9 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "models_loaded": _models is not None,
         "use_llm": _use_llm(),
+        # Name the model, so "use_llm: true" can be checked against a model
+        # that still exists rather than merely asserting a key was present.
+        "llm_model": gemini_model() if _use_llm() else None,
     }
 
 

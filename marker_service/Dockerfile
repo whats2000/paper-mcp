@@ -23,9 +23,25 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Runtime libs marker/opencv (surya) need.
+# Runtime libs marker/opencv (surya) need, plus a C compiler.
+#
+# gcc is NOT a build-time convenience here — it is needed at RUNTIME. torch
+# 2.13 dispatches some ops (e.g. `_native.ops.bmm_outer_product`) through
+# Triton, which JIT-compiles a CUDA utils module on first use and shells out
+# to a compiler to do it. Without one the very first GPU inference dies with
+# "RuntimeError: Failed to find C compiler", so every /extract answers 500 and
+# the service is useless while still reporting healthy. Measured on this image:
+# layout recognition crashed on the first page; with gcc the same PDF extracted
+# in 13s. Slim images ship no toolchain, hence this line.
+#
+# libc6-dev is NOT optional alongside it: Debian's `gcc` only *Recommends*
+# it, so under --no-install-recommends the compiler installs without crt1.o
+# or the libc headers and every link dies with "cannot find Scrt1.o". That
+# failure is invisible when testing by hand — a bare `apt-get install gcc`
+# pulls libc6-dev in via Recommends and works — and only appears in the
+# built image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 \
+    libgl1 libglib2.0-0 gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Fast installs with uv (project convention). The uv binary is copied from its
@@ -38,7 +54,7 @@ COPY pyproject.toml .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r pyproject.toml
 
-COPY app.py .
+COPY app.py llm_config.py ./
 
 # Models are NOT baked into the image — they download ONCE into the /models
 # named volume (see docker-compose.yml) on first /extract and persist across
