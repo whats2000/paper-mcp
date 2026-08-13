@@ -25,6 +25,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from paper_mcp import __version__
 from paper_mcp.api.artifacts import router as artifacts_router
 from paper_mcp.config import Settings, settings
+from paper_mcp.tools.compile import tool_compile_latex
 from paper_mcp.tools.discovery import (
     tool_find_related,
     tool_resolve_paper,
@@ -96,6 +97,20 @@ def build_mcp_server() -> MCPServer[Any]:
             "Check a background extraction started by fetch_paper. Returns state "
             "(queued/running/done/error). When done, call fetch_paper again to "
             "get the bundle from cache. No network scope."
+        ),
+    )
+    server.add_tool(
+        tool_compile_latex,
+        name="compile_latex",
+        description=(
+            "Compile LaTeX (including Beamer) to a PDF and return its URL, or "
+            "structured errors with file and line when it fails. Supply figures "
+            "via assets as base64 with the relative paths the source references. "
+            "Exactly ONE attempt — this tool does not revise or retry; read the "
+            "errors and resubmit. Runs in an isolated sandbox with no network "
+            "and no shell escape; on a deployment without a sandbox it refuses "
+            "rather than executing untrusted input. Scope: no network, writes "
+            "only to a temporary job directory."
         ),
     )
     server.add_tool(
