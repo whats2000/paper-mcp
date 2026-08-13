@@ -35,6 +35,27 @@ def bundle_key(paper: PaperRef) -> str:
     )
 
 
+def attach_urls(bundle: Bundle, *, store: ArtifactStore) -> Bundle:
+    """Materialize artifact URLs from the *current* public base URL.
+
+    A URL is deployment state, not content, so none is ever persisted. The
+    cache outlives the deployment — a named volume survives a redeploy behind
+    a new hostname or port — and a bundle that stored its origin replayed it
+    verbatim afterwards: every figure link pointing at somewhere that no
+    longer answered, while the files sat perfectly intact on disk. Silent,
+    because the bundle itself still looks complete.
+
+    Deriving on every serve costs a string join and makes the failure
+    impossible: the token and the path inside the entry are content, and only
+    the origin comes from configuration.
+    """
+    for figure in bundle.figures:
+        figure.image_url = store.url_for(bundle.bundle_id, figure.image_path)
+    if bundle.artifact is not None:
+        bundle.artifact.zip_url = store.url_for(bundle.bundle_id, BUNDLE_ZIP)
+    return bundle
+
+
 def load_cached(key: str, *, store: ArtifactStore) -> Bundle | None:
     """Return the cached bundle for `key`, or None.
 
@@ -45,10 +66,11 @@ def load_cached(key: str, *, store: ArtifactStore) -> Bundle | None:
     if not manifest.is_file():
         return None
     try:
-        return Bundle.model_validate_json(manifest.read_text(encoding="utf-8"))
+        cached = Bundle.model_validate_json(manifest.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         logger.warning("cached bundle %s is unreadable (%s); rebuilding", key, exc)
         return None
+    return attach_urls(cached, store=store)
 
 
 def _write_zip(entry: Path) -> int:
@@ -97,8 +119,6 @@ async def build_bundle(
 
     # Full text on disk; the inline copy may be capped.
     (entry / MARKDOWN_FILE).write_text(markdown, encoding="utf-8")
-    for figure in figures:
-        figure.image_url = store.url_for(key, figure.image_path)
 
     inline, truncated = cap_markdown(markdown)
     zip_bytes = _write_zip(entry)
@@ -111,12 +131,12 @@ async def build_bundle(
         figures=figures,
         extraction=ExtractionInfo(engine="marker", pages=pages, warnings=warnings),
         artifact=ArtifactRef(
-            zip_url=store.url_for(key, BUNDLE_ZIP),
             bytes=zip_bytes,
             expires_at=(datetime.now(UTC) + timedelta(hours=ttl_hours)).isoformat(),
         ),
     )
     # Written last: its presence is what makes the entry a cache hit, so an
-    # interrupted run leaves a miss rather than a half-paper.
+    # interrupted run leaves a miss rather than a half-paper. Written *before*
+    # URLs are attached, so the stored form carries no origin.
     (entry / BUNDLE_JSON).write_text(bundle.model_dump_json(indent=1), encoding="utf-8")
-    return bundle
+    return attach_urls(bundle, store=store)

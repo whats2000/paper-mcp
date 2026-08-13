@@ -58,7 +58,10 @@ class ExtractionInfo(BaseModel):
 
 
 class ArtifactRef(BaseModel):
-    zip_url: str
+    # Optional in the model, always populated on the wire: URLs are derived at
+    # serve time rather than stored, so the persisted form has none. See
+    # `build_bundle.attach_urls`.
+    zip_url: str | None = None
     bytes: int = 0
     expires_at: str | None = None
 

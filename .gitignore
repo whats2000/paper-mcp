@@ -13,3 +13,10 @@ artifacts/
 coverage.xml
 htmlcov/
 .check-artifacts/
+
+# Local client wiring — points at a developer's own instance.
+.mcp.json
+
+# Local verification harnesses, kept out of the repo.
+scripts/security_check.py
+scripts/authenticated_client_check.py

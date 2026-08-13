@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from paper_mcp.artifacts import ArtifactStore
+from paper_mcp.artifacts import ArtifactStore, token_for
 from paper_mcp.models import InvalidArgumentError, PaperRef
 from paper_mcp.pipelines import build_bundle as bb
 from paper_mcp.pipelines.build_bundle import build_bundle, bundle_key, load_cached
@@ -113,6 +113,41 @@ async def test_the_zip_contains_the_full_markdown_and_figures(
     assert "markdown.md" in names
     assert any(n.startswith("figures/") for n in names)
     assert "bundle.zip" not in names  # never packs itself
+
+
+async def test_cached_urls_follow_the_current_base_url(
+    tmp_path: Path, _no_network: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cache outlives the deployment. A bundle built behind one origin and
+    # replayed behind another must not hand back links to the old one — the
+    # files are still there, so the failure is silent and total.
+    monkeypatch.setenv("PAPER_MCP_PUBLIC_BASE_URL", "http://old.example:8000")
+    store = ArtifactStore(tmp_path)
+    await build_bundle(_PAPER, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
+
+    monkeypatch.setenv("PAPER_MCP_PUBLIC_BASE_URL", "https://new.example")
+    cached = load_cached(bundle_key(_PAPER), store=store)
+
+    assert cached is not None
+    assert cached.figures[0].image_url == (
+        f"https://new.example/a/{token_for(cached.bundle_id)}/{cached.figures[0].image_path}"
+    )
+    assert cached.artifact is not None
+    assert cached.artifact.zip_url is not None
+    assert cached.artifact.zip_url.startswith("https://new.example/a/")
+
+
+async def test_no_origin_is_written_to_disk(
+    tmp_path: Path, _no_network: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Derive-on-serve only works if nothing stale is stored to begin with.
+    monkeypatch.setenv("PAPER_MCP_PUBLIC_BASE_URL", "http://old.example:8000")
+    store = ArtifactStore(tmp_path)
+
+    await build_bundle(_PAPER, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
+
+    raw = (store.dir_for(bundle_key(_PAPER)) / "bundle.json").read_text(encoding="utf-8")
+    assert "old.example" not in raw
 
 
 async def test_extraction_warnings_reach_the_caller(
